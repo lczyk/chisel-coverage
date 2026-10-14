@@ -18,7 +18,7 @@ for each package:
 2. synthesise one sdf holding, for the same package:
     - `cov-all` with a single entry `/**` -- the whole deb.
     - every real slice, stripped (see below). with `--slice`, only those.
-    - `cov-ignore` whose entries are the `--ignore` globs, when any.
+    - one `cov-ignore-<n>` per `--ignore` glob, when any.
 
     globs in one package never conflict with each other or with explicit paths of that package, so all of this is one file.
 3. write a throwaway release: the original `chisel.yaml` plus that one sdf, via `chisel-proxy/pkg/temp-release`.
@@ -26,12 +26,12 @@ for each package:
 5. arithmetic per architecture:
     - `all` = the `cov-all` set
     - `covered` = union of the real slices' sets
-    - `ignored` = (`all` - `covered`) intersected with the `cov-ignore` set
+    - `ignored` = (`all` - `covered`) intersected with the union of the `cov-ignore-<n>` sets
     - `uncovered` = `all` - `covered` - `ignored`
 
     a path claimed by two slices shows under both. ignores only ever shrink `uncovered`; a covered path that matches an ignore stays covered.
 
-a slice with no entries left after stripping is not cut; its set is empty. the manifest is never used: a slice with `generate: manifest` is just a slice whose generated entry gets stripped like any other, and nothing depends on manifest generation working.
+a slice with no entries left after stripping is not cut; its set is empty. chisel refuses a path or glob that matches nothing in the package (`no content at <path>`), so each ignore glob gets a slice of its own: a `no content` failure of an ignore slice is an empty set, while the same failure of a real slice is an error, since the real cut would fail the same way. the manifest is never used: a slice with `generate: manifest` is just a slice whose generated entry gets stripped like any other, and nothing depends on manifest generation working.
 
 ### stripping
 
@@ -53,7 +53,7 @@ everything in the `cov-all` rootfs counts, directories included. a directory is 
 
 chisel's cache (`$XDG_CACHE_HOME/chisel`) is content-addressed and shared across runs; the tool uses it as-is. one wrinkle: when two chisel processes miss on the same blob at once, both write to the same `<digest>.tmp` and one of them fails its digest check (`internal/cache/cache.go`, `Create` with a known digest). concurrent cuts must therefore never share a cold blob.
 
-- one lane per architecture. a lane runs its cuts one after another: for each package, `cov-all`, then each slice, then `cov-ignore`. nothing on one architecture ever races itself.
+- one lane per architecture. a lane runs its cuts one after another: for each package, `cov-all`, then each slice, then the ignore slices. nothing on one architecture ever races itself.
 - the lead lane (the first architecture given; the host's by default) runs to completion alone, then the remaining lanes run in parallel. the only blobs lanes can share are `arch: all` debs, and the lead lane has fetched those by the time the others start.
 
 on a warm cache a cut is well under a second, so the lead lane costs seconds per package. `-j` is not needed yet.
@@ -126,7 +126,7 @@ deps: `gopkg.in/yaml.v3`, `github.com/lczyk/chisel-proxy/pkg` (`temp-release`; `
 ## testing
 
 - unit tests with a fake `chisel` script that populates `--root` from the slice name. one of them takes a per-architecture lock in the fake and fails if two cuts on one architecture overlap.
-- an integration test with the real `chisel` against an in-memory signed archive (`chisel-proxy/pkg/apt`) of handmade debs, reached through `http_proxy` and a throwaway `XDG_CACHE_HOME`. this pins the chisel assumptions above (globs coexisting in one sdf, implicit parents, the ignore slice) offline. skipped when `chisel` is not found.
+- an integration test with the real `chisel` against an in-memory signed archive (`chisel-proxy/pkg/apt`) of handmade debs, reached through `http_proxy` and a throwaway `XDG_CACHE_HOME`. this pins the chisel assumptions above (globs coexisting in one sdf, implicit parents, the ignore slices, `no content`) offline. skipped when `chisel` is not found.
 - `e2e/` against the real archive and a real chisel-releases clone, behind `-tags e2e` and `CHISEL_SLICE_COVERAGE_E2E=1`.
 
 ## carried over from the prototype
