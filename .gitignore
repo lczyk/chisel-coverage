@@ -1,0 +1,18 @@
+# build output
+bin/
+/chisel-slice-coverage
+
+# coverage
+cover.out
+cover.html
+
+# local dev against a sibling chisel-proxy checkout
+go.work
+go.work.sum
+
+# editor / os noise
+.DS_Store
+*.swp
+
+# go test binaries
+*.test
