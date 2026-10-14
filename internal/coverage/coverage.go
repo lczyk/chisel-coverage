@@ -1,0 +1,405 @@
+// Package coverage drives the cuts for a set of packages and architectures and
+// turns their rootfs listings into coverage: what the deb ships, what the
+// slices take, what is left.
+package coverage
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+
+	temprelease "github.com/lczyk/chisel-proxy/pkg/temp-release"
+
+	"github.com/lczyk/chisel-slice-coverage/internal/cut"
+	"github.com/lczyk/chisel-slice-coverage/internal/sdf"
+)
+
+// AllArches lists every architecture ubuntu builds for, in --arch all order.
+var AllArches = []string{"amd64", "arm64", "armhf", "i386", "ppc64el", "riscv64", "s390x"}
+
+// Options configures a run.
+type Options struct {
+	Release string
+	Arches  []string // the first is the lead lane
+	Only    []string // --slice values, bare or <package>_<slice>; nil means all
+	Ignores []string
+	Keep    bool
+	Runner  *cut.Runner
+	Log     io.Writer // --keep notices; nil discards
+}
+
+// Arch is one package's coverage on one architecture.
+type Arch struct {
+	Arch      string
+	Available bool  // false: chisel found no such package for the architecture
+	Err       error // a cut failed; nothing else is set
+	Version   string
+	DebArch   string
+	Total     int
+	Covered   []string
+	Uncovered []string
+	Ignored   []string
+	Slices    map[string][]string // real slice -> paths in its rootfs
+}
+
+// Package is one package's coverage across the architectures asked for.
+type Package struct {
+	Name   string
+	Slices []string // the slices considered, in file order
+	Arches []Arch   // in Options.Arches order
+}
+
+type prepared struct {
+	def    *sdf.Definition
+	slices []string // real slices considered
+	cuts   []string // slices to cut, sdf.AllSlice first
+	rel    *temprelease.Release
+}
+
+type run struct {
+	opts     Options
+	work     string
+	prepared []*prepared
+	results  []Package
+}
+
+// Run cuts every package on every architecture and returns the results in
+// input order. It fails up front on a bad release, a bad slice definition or
+// an unknown --slice; a failed cut is reported per architecture instead.
+func Run(opts Options, pkgs []string) ([]Package, error) {
+	if len(pkgs) == 0 {
+		return nil, fmt.Errorf("no packages given")
+	}
+	if len(opts.Arches) == 0 {
+		return nil, fmt.Errorf("no architectures given")
+	}
+	chiselYAML, err := os.ReadFile(filepath.Join(opts.Release, "chisel.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("%s is not a chisel release: %w", opts.Release, err)
+	}
+	only, err := resolveOnly(opts.Only, pkgs)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &run{opts: opts}
+	defer r.cleanup()
+	for _, pkg := range pkgs {
+		p, err := r.prepare(chiselYAML, pkg, only[pkg])
+		if err != nil {
+			return nil, err
+		}
+		r.prepared = append(r.prepared, p)
+		r.results = append(r.results, Package{Name: pkg, Slices: p.slices, Arches: make([]Arch, len(opts.Arches))})
+	}
+	r.work, err = os.MkdirTemp("", "chisel-slice-coverage-*")
+	if err != nil {
+		return nil, err
+	}
+	if opts.Keep {
+		r.logf("rootfs dirs: %s", r.work)
+	}
+
+	// The lead lane alone first, then the rest in parallel: see design.md on
+	// chisel's cache.
+	r.lane(0)
+	var wg sync.WaitGroup
+	for ai := 1; ai < len(opts.Arches); ai++ {
+		wg.Add(1)
+		go func(ai int) {
+			defer wg.Done()
+			r.lane(ai)
+		}(ai)
+	}
+	wg.Wait()
+	return r.results, nil
+}
+
+// resolveOnly maps each package to the slices --slice keeps for it. A package
+// absent from the map is unrestricted. A bare name applies to every package
+// that has it and must exist in at least one; a <package>_<slice> name must
+// name a listed package.
+func resolveOnly(only, pkgs []string) (map[string][]string, error) {
+	if len(only) == 0 {
+		return nil, nil
+	}
+	listed := map[string]bool{}
+	for _, p := range pkgs {
+		listed[p] = true
+	}
+	out := map[string][]string{}
+	for _, p := range pkgs {
+		out[p] = []string{}
+	}
+	for _, s := range only {
+		if pkg, name, ok := strings.Cut(s, "_"); ok {
+			if !listed[pkg] {
+				return nil, fmt.Errorf("--slice %s: package %s is not being checked", s, pkg)
+			}
+			out[pkg] = append(out[pkg], name)
+			continue
+		}
+		for _, p := range pkgs {
+			out[p] = append(out[p], s)
+		}
+	}
+	return out, nil
+}
+
+func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, error) {
+	def, err := sdf.Read(r.opts.Release, pkg)
+	if err != nil {
+		return nil, err
+	}
+	var keep []string
+	if only != nil {
+		// A bare --slice name is kept only where it exists; a prefixed one
+		// must exist.
+		for _, name := range only {
+			if def.Slice(name) != nil {
+				keep = append(keep, name)
+			} else if r.prefixed(pkg + "_" + name) {
+				return nil, fmt.Errorf("%s has no slice %q", pkg, name)
+			}
+		}
+		if keep == nil {
+			keep = []string{}
+		}
+		if len(keep) == 0 && !r.anyExists(only) {
+			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(only, ", "))
+		}
+	}
+	file, cuts, err := sdf.Synthesise(def, keep, r.opts.Ignores)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := temprelease.New(chiselYAML)
+	if err != nil {
+		return nil, err
+	}
+	if err := rel.WriteSlice(pkg, file); err != nil {
+		_ = rel.Remove()
+		return nil, err
+	}
+	if r.opts.Keep {
+		r.logf("release for %s: %s", pkg, rel.Dir)
+	}
+	p := &prepared{def: def, cuts: cuts, rel: rel}
+	for _, s := range def.Slices {
+		if keep == nil || slices.Contains(keep, s.Name) {
+			p.slices = append(p.slices, s.Name)
+		}
+	}
+	return p, nil
+}
+
+func (r *run) prefixed(name string) bool { return slices.Contains(r.opts.Only, name) }
+
+// anyExists reports whether any of the bare names exists in some package
+// already prepared or still to come. Checked lazily: the error only matters
+// when a package ends up with nothing to cut.
+func (r *run) anyExists(names []string) bool {
+	for _, name := range names {
+		if r.prefixed(name) {
+			continue
+		}
+		for _, p := range r.prepared {
+			if p.def.Slice(name) != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *run) lane(ai int) {
+	arch := r.opts.Arches[ai]
+	for pi, p := range r.prepared {
+		r.results[pi].Arches[ai] = r.cutPackage(p, arch)
+	}
+}
+
+func (r *run) cutPackage(p *prepared, arch string) Arch {
+	a := Arch{Arch: arch, Slices: map[string][]string{}}
+	sets := map[string][]string{}
+	for _, name := range p.cuts {
+		root := filepath.Join(r.work, p.def.Package, arch, name)
+		res, err := r.opts.Runner.Cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
+		if !r.opts.Keep {
+			_ = os.RemoveAll(root)
+		}
+		if errors.Is(err, cut.ErrNotAvailable) && name == sdf.AllSlice {
+			return a
+		}
+		// An ignore glob matching nothing in this package ignores nothing.
+		if errors.Is(err, cut.ErrNoContent) && sdf.IsIgnore(name) {
+			continue
+		}
+		if err != nil {
+			a.Err = err
+			return a
+		}
+		sets[name] = res.Paths
+		if name == sdf.AllSlice {
+			a.Version, a.DebArch = res.Version, res.DebArch
+		}
+	}
+	a.Available = true
+
+	covered := map[string]bool{}
+	for _, name := range p.slices {
+		paths := sets[name]
+		if paths == nil {
+			paths = []string{}
+		}
+		a.Slices[name] = paths
+		for _, path := range paths {
+			covered[path] = true
+		}
+	}
+	ignore := map[string]bool{}
+	for name, paths := range sets {
+		if !sdf.IsIgnore(name) {
+			continue
+		}
+		for _, path := range paths {
+			ignore[path] = true
+		}
+	}
+	a.Covered, a.Uncovered, a.Ignored = []string{}, []string{}, []string{}
+	for _, path := range sets[sdf.AllSlice] {
+		switch {
+		case covered[path]:
+			a.Covered = append(a.Covered, path)
+		case ignore[path]:
+			a.Ignored = append(a.Ignored, path)
+		default:
+			a.Uncovered = append(a.Uncovered, path)
+		}
+	}
+	a.Total = len(sets[sdf.AllSlice])
+	return a
+}
+
+func (r *run) cleanup() {
+	if r.opts.Keep {
+		return
+	}
+	for _, p := range r.prepared {
+		_ = p.rel.Remove()
+	}
+	if r.work != "" {
+		_ = os.RemoveAll(r.work)
+	}
+}
+
+func (r *run) logf(format string, args ...any) {
+	if r.opts.Log != nil {
+		fmt.Fprintf(r.opts.Log, "[chisel-slice-coverage] "+format+"\n", args...)
+	}
+}
+
+// The multiarch triplet of each architecture.
+var triplet = map[string]string{
+	"amd64":   "x86_64-linux-gnu",
+	"arm64":   "aarch64-linux-gnu",
+	"armhf":   "arm-linux-gnueabihf",
+	"i386":    "i386-linux-gnu",
+	"ppc64el": "powerpc64le-linux-gnu",
+	"riscv64": "riscv64-linux-gnu",
+	"s390x":   "s390x-linux-gnu",
+}
+
+var abiDir = regexp.MustCompile(`<arch>-linux-[^/]+/`)
+
+// Normalise rewrites the architecture's multiarch triplet in path so paths from
+// different architectures compare equal: the cpu part wherever it is followed
+// by -linux- (so "arm" inside "apparmor" is left alone), the abi part only as
+// a directory component (so a file name ending in the triplet is left alone).
+func Normalise(path, arch string) string {
+	t, ok := triplet[arch]
+	if !ok {
+		return path
+	}
+	cpu, _, _ := strings.Cut(t, "-")
+	path = strings.ReplaceAll(path, cpu+"-linux-", "<arch>-linux-")
+	return abiDir.ReplaceAllString(path, "<arch>-linux-<gnu>/")
+}
+
+// Group is a set of architectures with the same result, which holds the
+// normalised paths of the first of them.
+type Group struct {
+	Arches []string
+	Arch
+}
+
+// Groups folds a package's architectures into groups with identical results:
+// the same version and availability, and the same uncovered, ignored and
+// per-slice sets after Normalise. Failed cuts are never grouped.
+func Groups(p Package) []Group {
+	var groups []Group
+	index := map[string]int{}
+	for _, a := range p.Arches {
+		n := normalised(a)
+		key := groupKey(n)
+		if a.Err != nil {
+			key = "err\x00" + a.Arch
+		}
+		if i, ok := index[key]; ok {
+			groups[i].Arches = append(groups[i].Arches, a.Arch)
+			continue
+		}
+		index[key] = len(groups)
+		groups = append(groups, Group{Arches: []string{a.Arch}, Arch: n})
+	}
+	return groups
+}
+
+func normalised(a Arch) Arch {
+	n := a
+	n.Covered = normaliseAll(a.Covered, a.Arch)
+	n.Uncovered = normaliseAll(a.Uncovered, a.Arch)
+	n.Ignored = normaliseAll(a.Ignored, a.Arch)
+	n.Slices = map[string][]string{}
+	for name, paths := range a.Slices {
+		n.Slices[name] = normaliseAll(paths, a.Arch)
+	}
+	return n
+}
+
+func normaliseAll(paths []string, arch string) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, Normalise(p, arch))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func groupKey(a Arch) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%v\x00%s\x00%v\x00", a.Available, a.Version, a.DebArch == "all")
+	for _, set := range [][]string{a.Uncovered, a.Ignored} {
+		b.WriteString(strings.Join(set, "\x00"))
+		b.WriteString("\x01")
+	}
+	names := make([]string, 0, len(a.Slices))
+	for name := range a.Slices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		b.WriteString(name)
+		b.WriteString("\x02")
+		b.WriteString(strings.Join(a.Slices[name], "\x00"))
+		b.WriteString("\x01")
+	}
+	return b.String()
+}
