@@ -1,0 +1,69 @@
+# chisel-slice-coverage
+
+development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture, and what each slice does take.
+
+## why
+
+when writing or reviewing a slice definition you want to know what you left out, on every architecture, without cutting and diffing a rootfs by hand. the slice definition declares paths; the deb has paths; the difference is the question.
+
+## use
+
+```shell
+cd ~/git/chisel-releases
+chisel-slice-coverage --ignore '/usr/share/man/**,/usr/share/doc/**' bash
+```
+
+```
+bash 5.2.21-2ubuntu4 [amd64]
+  total 44  covered 16  ignored 19  uncovered 9
+
+  uncovered:
+    /usr/share/debianutils/
+    /usr/share/debianutils/shells.d/
+    /usr/share/debianutils/shells.d/bash
+    /usr/share/info/
+    /usr/share/lintian/
+    /usr/share/lintian/overrides/
+    /usr/share/lintian/overrides/bash
+    /usr/share/menu/
+    /usr/share/menu/bash
+
+  slices:
+    config (6):
+      /etc/
+      /etc/bash.bashrc
+      ...
+```
+
+every entry of the deb counts, directories included; a directory is covered once anything under it is. `--arch all` checks every architecture, and architectures with the same result (after folding the multiarch triplet into `<arch>-linux-<gnu>`) share a block. several packages can be given at once. the `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`.
+
+```
+chisel-slice-coverage [flags] <package>...
+  --release <dir>        chisel-releases checkout (default ".")
+  --arch <a>[,<a>...]    architectures to check; "all" for every one (default: host)
+  --slice <s>[,<s>...]   only these slices, bare or <package>_<slice> (default: all)
+  --ignore <glob>[,...]  leave matching paths out of the uncovered set (chisel glob syntax)
+  --json                 machine-readable output, one entry per architecture
+  --fail-uncovered       exit 1 when any architecture has uncovered paths
+  --keep                 keep the temp releases and rootfs dirs
+  -v                     stream chisel's output
+```
+
+`--ignore` only ever shrinks the uncovered set; a covered path that matches an ignore stays covered. the exit code is 0 unless something failed (2), or `--fail-uncovered` is given and paths are left (1), which makes it usable as a ci gate.
+
+## how it matches
+
+chisel does the work. for each package the tool writes a throwaway release holding your `chisel.yaml` and a single slice definition: the package's own slices with everything a deb cannot answer stripped (essentials, mutate scripts, `until`, generated `text` / `symlink` / `make` / `generate` entries; `copy` entries are keyed by their source), plus one slice taking the whole deb (`/**`) and one per ignore glob. every slice is then `chisel cut` on its own and its rootfs walked. what the whole-deb cut has and no slice cut has is uncovered.
+
+so archive selection, suites, priorities, pro archives, signatures, `arch:` lists and glob semantics are all whatever the chisel binary you run does, and the cache is chisel's own. two things follow:
+
+- the result is "which deb paths does the slice definition declare", not "what does a real cut produce": essentials and mutation are out of the picture on purpose.
+- a package not built for an architecture is reported as not available, not as an error.
+
+## build
+
+```shell
+make build      # ./bin/chisel-slice-coverage
+make test       # unit tests; the real-chisel ones skip without `chisel`
+make e2e        # real chisel against the real archive and a chisel-releases clone (needs network)
+```
