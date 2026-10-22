@@ -27,7 +27,7 @@ total 44  covered 16  ignored 19  uncovered 9
 /usr/share/menu/bash
 ```
 
-every entry of the deb counts, directories included; a directory is covered once anything under it is. `--arch all` checks every architecture, and architectures with the same result (after folding the multiarch triplet into `<arch>-linux-<gnu>`) share a block. several packages can be given at once. the `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`.
+every entry of the deb counts, directories included; a directory is covered once anything under it is. `--arch all` checks every architecture, and architectures with the same result (after folding the multiarch triplet into `<arch>-linux-<gnu>`) share a block; `--no-group` gives one block per architecture with its real paths instead. several packages can be given at once. the `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`.
 
 ```
 chisel-slice-coverage [flags] <package>...
@@ -38,6 +38,9 @@ chisel-slice-coverage [flags] <package>...
                                (default: all)
       --ignore=<glob>[,...]    leave matching paths out of the uncovered set
                                (chisel glob syntax)
+      --no-group               one block per architecture with its real paths,
+                               instead of folding architectures with the same
+                               result
       --json                   machine-readable output, one entry per
                                architecture
       --fail-uncovered         exit 1 when any architecture has uncovered paths

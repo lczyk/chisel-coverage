@@ -77,6 +77,9 @@ chisel-slice-coverage [flags] <package>...
                                (default: all)
       --ignore=<glob>[,...]    leave matching paths out of the uncovered set
                                (chisel glob syntax)
+      --no-group               one block per architecture with its real paths,
+                               instead of folding architectures with the same
+                               result
       --json                   machine-readable output, one entry per
                                architecture
       --fail-uncovered         exit 1 when any architecture has uncovered paths
@@ -91,7 +94,7 @@ flags are parsed by go-flags, the library chisel uses, so `--flag=value`, `--fla
 
 ## report
 
-text, to stdout. architectures with identical results share a block; identical means equal version, availability, and equal `uncovered`, `ignored` and per-slice sets after normalising the multiarch triplet (`x86_64-linux-gnu` -> `<arch>-linux-<gnu>`; the cpu part when followed by `-linux-`, the abi part only as a directory component). errors and "not available" are never grouped with results.
+text, to stdout. architectures with identical results share a block; identical means equal version, availability, and equal `uncovered`, `ignored` and per-slice sets after normalising what names the architecture: the multiarch triplet becomes `<arch>-linux-<gnu>` wherever it is (the cpu part only where `-linux-` follows, so `apparmor` is safe; `i686` counts for i386; the abi part in file names too, so `perl5.40-arm-linux-gnueabihf.1.gz` folds), and the architecture's own name becomes `<arch>` where it stands as a word (`java-21-openjdk-amd64`, `README.Debian.armhf.gz`). a sweep of every 26.04 package showed no path that folds onto another on the same architecture, so folding can only split, never merge wrongly. errors and "not available" are never grouped with results. a group of one architecture shows its real paths, not the folded ones, and `--no-group` makes every architecture such a group.
 
 ```
 bash 5.2.21-2ubuntu4 [amd64, arm64]
