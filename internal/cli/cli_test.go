@@ -17,9 +17,10 @@ import (
 func TestParseArgs(t *testing.T) {
 	f, pkgs, err := parseArgs([]string{"--release", "/r", "--arch", "amd64,arm64", "--arch=s390x", "-v",
 		"bash", "--slice", "bins", "--ignore", "/usr/share/doc/**,/usr/share/man/**", "--json",
-		"--fail-uncovered", "--keep", "coreutils"}, io.Discard)
+		"--fail-uncovered", "--keep", "--no-group", "coreutils"}, io.Discard)
 	assert.NoError(t, err)
 	assert.EqualArrays(t, pkgs, []string{"bash", "coreutils"})
+	assert.That(t, f.NoGroup)
 	assert.Equal(t, f.Release, "/r")
 	assert.EqualArrays(t, f.Arches, []string{"amd64", "arm64", "s390x"})
 	assert.EqualArrays(t, f.Slices, []string{"bins"})
@@ -102,7 +103,7 @@ func sample() []coverage.Package {
 
 func TestRenderText(t *testing.T) {
 	var out bytes.Buffer
-	renderText(&out, sample(), style{})
+	renderText(&out, sample(), true, style{})
 	assert.Equal(t, out.String(), `bash 5.2-1 [amd64, arm64]
 total 6  covered 3  ignored 1  uncovered 2
 /usr/lib/
@@ -118,9 +119,27 @@ total 0  covered 0  ignored 0  uncovered 0
 `)
 }
 
+func TestRenderTextUngrouped(t *testing.T) {
+	var out bytes.Buffer
+	renderText(&out, sample()[:1], false, style{})
+	assert.Equal(t, out.String(), `bash 5.2-1 [amd64]
+total 6  covered 3  ignored 1  uncovered 2
+/usr/lib/
+/usr/lib/x86_64-linux-gnu/
+bash [i386]: not available
+bash 5.2-1 [arm64]
+total 6  covered 3  ignored 1  uncovered 2
+/usr/lib/
+/usr/lib/aarch64-linux-gnu/
+bash [s390x]: error
+  chisel cut ... exited 1
+    boom
+`)
+}
+
 func TestRenderTextColoured(t *testing.T) {
 	var out bytes.Buffer
-	renderText(&out, sample(), colours)
+	renderText(&out, sample(), true, colours)
 	assert.ContainsString(t, out.String(), "\x1b[1;34mbash\x1b[0m 5.2-1 \x1b[2m[amd64, arm64]\x1b[0m\n")
 	assert.ContainsString(t, out.String(), "total 6  \x1b[32mcovered 3\x1b[0m  \x1b[33mignored 1\x1b[0m  \x1b[31muncovered 2\x1b[0m\n/usr/lib/\n")
 	assert.ContainsString(t, out.String(), "total 1  \x1b[32mcovered 1\x1b[0m  \x1b[32mignored 0\x1b[0m  \x1b[32muncovered 0\x1b[0m\n")

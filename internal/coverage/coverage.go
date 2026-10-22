@@ -337,35 +337,65 @@ func stampf(w io.Writer, format string, args ...any) {
 	fmt.Fprintf(w, "%s "+format+"\n", append([]any{cut.Stamp()}, args...)...)
 }
 
-// The multiarch triplet of each architecture.
-var triplet = map[string]string{
-	"amd64":   "x86_64-linux-gnu",
-	"arm64":   "aarch64-linux-gnu",
-	"armhf":   "arm-linux-gnueabihf",
-	"i386":    "i386-linux-gnu",
-	"ppc64el": "powerpc64le-linux-gnu",
-	"riscv64": "riscv64-linux-gnu",
-	"s390x":   "s390x-linux-gnu",
+// The cpu part of each architecture's multiarch triplet, plus gcc's spelling
+// for i386, which it uses under /usr/lib/gcc.
+var cpus = map[string][]string{
+	"amd64":   {"x86_64"},
+	"arm64":   {"aarch64"},
+	"armhf":   {"arm"},
+	"i386":    {"i386", "i686"},
+	"ppc64el": {"powerpc64le"},
+	"riscv64": {"riscv64"},
+	"s390x":   {"s390x"},
 }
 
-var abiDir = regexp.MustCompile(`<arch>-linux-[^/]+/`)
+var abi = regexp.MustCompile(`<arch>-linux-gnu[a-z0-9]*`)
 
-// Normalise rewrites the architecture's multiarch triplet in path so paths from
-// different architectures compare equal: the cpu part wherever it is followed
-// by -linux- (so "arm" inside "apparmor" is left alone), the abi part only as
-// a directory component (so a file name ending in the triplet is left alone).
+// Normalise rewrites what names the architecture in path, so paths from
+// different architectures compare equal: the multiarch triplet becomes
+// <arch>-linux-<gnu> (the cpu part only where -linux- follows, so "arm" inside
+// "apparmor" is left alone; the abi part wherever it is, in file names too),
+// and the architecture's own name becomes <arch> where it stands as a word,
+// as in java-21-openjdk-amd64 or README.Debian.armhf.gz.
 func Normalise(path, arch string) string {
-	t, ok := triplet[arch]
-	if !ok {
+	if _, ok := cpus[arch]; !ok {
 		return path
 	}
-	cpu, _, _ := strings.Cut(t, "-")
-	path = strings.ReplaceAll(path, cpu+"-linux-", "<arch>-linux-")
-	return abiDir.ReplaceAllString(path, "<arch>-linux-<gnu>/")
+	for _, cpu := range cpus[arch] {
+		path = strings.ReplaceAll(path, cpu+"-linux-", "<arch>-linux-")
+	}
+	path = abi.ReplaceAllString(path, "<arch>-linux-<gnu>")
+	return replaceWord(path, arch, "<arch>")
 }
 
-// Group is a set of architectures with the same result, which holds the
-// normalised paths of the first of them.
+// replaceWord replaces word in s where neither neighbour is a letter or digit.
+func replaceWord(s, word, with string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, word)
+		if i < 0 {
+			break
+		}
+		j := i + len(word)
+		if (i == 0 || !alnum(s[i-1])) && (j == len(s) || !alnum(s[j])) {
+			b.WriteString(s[:i])
+			b.WriteString(with)
+		} else {
+			b.WriteString(s[:j])
+		}
+		s = s[j:]
+	}
+	b.WriteString(s)
+	return b.String()
+}
+
+func alnum(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// Group is a set of architectures with the same result. A group of several
+// architectures holds the normalised paths, which stand for all of them; a
+// group of one holds that architecture's real paths.
 type Group struct {
 	Arches []string
 	Arch
@@ -376,6 +406,7 @@ type Group struct {
 // per-slice sets after Normalise. Failed cuts are never grouped.
 func Groups(p Package) []Group {
 	var groups []Group
+	var raw []Arch
 	index := map[string]int{}
 	for _, a := range p.Arches {
 		n := normalised(a)
@@ -389,6 +420,21 @@ func Groups(p Package) []Group {
 		}
 		index[key] = len(groups)
 		groups = append(groups, Group{Arches: []string{a.Arch}, Arch: n})
+		raw = append(raw, a)
+	}
+	for i := range groups {
+		if len(groups[i].Arches) == 1 {
+			groups[i].Arch = raw[i]
+		}
+	}
+	return groups
+}
+
+// Ungrouped is one group per architecture, real paths, nothing folded.
+func Ungrouped(p Package) []Group {
+	groups := make([]Group, 0, len(p.Arches))
+	for _, a := range p.Arches {
+		groups = append(groups, Group{Arches: []string{a.Arch}, Arch: a})
 	}
 	return groups
 }

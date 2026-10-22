@@ -336,13 +336,38 @@ func TestNormalise(t *testing.T) {
 		{"/usr/lib/x86_64-linux-gnu/libc.so.6", "amd64", "/usr/lib/<arch>-linux-<gnu>/libc.so.6"},
 		{"/usr/lib/aarch64-linux-gnu/", "arm64", "/usr/lib/<arch>-linux-<gnu>/"},
 		{"/usr/lib/arm-linux-gnueabihf/bash/", "armhf", "/usr/lib/<arch>-linux-<gnu>/bash/"},
-		{"/usr/bin/x86_64-linux-gnu-gcc", "amd64", "/usr/bin/<arch>-linux-gnu-gcc"},
+		{"/usr/bin/x86_64-linux-gnu-gcc", "amd64", "/usr/bin/<arch>-linux-<gnu>-gcc"},
+		{"/usr/share/man/man1/perl5.40-arm-linux-gnueabihf.1.gz", "armhf", "/usr/share/man/man1/perl5.40-<arch>-linux-<gnu>.1.gz"},
+		{"/usr/lib/python3.14/lib-dynload/_ssl.cpython-314-x86_64-linux-gnu.so", "amd64", "/usr/lib/python3.14/lib-dynload/_ssl.cpython-314-<arch>-linux-<gnu>.so"},
+		{"/usr/lib/gcc/i686-linux-gnu/13/", "i386", "/usr/lib/gcc/<arch>-linux-<gnu>/13/"},
+		{"/usr/lib/i386-linux-gnu/", "i386", "/usr/lib/<arch>-linux-<gnu>/"},
+		{"/usr/lib/jvm/java-21-openjdk-amd64/bin/java", "amd64", "/usr/lib/jvm/java-21-openjdk-<arch>/bin/java"},
+		{"/usr/share/doc/gcc-14-base/README.Debian.armhf.gz", "armhf", "/usr/share/doc/gcc-14-base/README.Debian.<arch>.gz"},
+		{"/usr/lib/s390x-linux-gnu/s390x/", "s390x", "/usr/lib/<arch>-linux-<gnu>/<arch>/"},
 		{"/etc/apparmor.d/arm", "armhf", "/etc/apparmor.d/arm"},
 		{"/usr/lib/i386-linux-gnu/x", "amd64", "/usr/lib/i386-linux-gnu/x"},
+		{"/usr/share/amd64foo/amd64", "arm64", "/usr/share/amd64foo/amd64"},
+		{"/usr/share/amd64foo/amd64", "amd64", "/usr/share/amd64foo/<arch>"},
 		{"/usr/lib/x86_64-linux-gnu/x", "nope", "/usr/lib/x86_64-linux-gnu/x"},
 	} {
-		assert.Equal(t, Normalise(tc.path, tc.arch), tc.want)
+		assert.Equal(t, Normalise(tc.path, tc.arch), tc.want, tc.path+" on "+tc.arch)
 	}
+}
+
+func TestGroupsSingletonKeepsRealPaths(t *testing.T) {
+	arch := func(name, path string) Arch {
+		return Arch{Arch: name, Available: true, Version: "1", Uncovered: []string{path}, Ignored: []string{}, Covered: []string{}, Slices: map[string][]string{}}
+	}
+	g := Groups(Package{Arches: []Arch{
+		arch("amd64", "/usr/lib/x86_64-linux-gnu/"),
+		arch("arm64", "/usr/lib/aarch64-linux-gnu/"),
+		arch("s390x", "/usr/lib/s390x-linux-gnu/ld64.so.1"),
+	}})
+	assert.Len(t, g, 2)
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
+	assert.EqualArrays(t, g[0].Uncovered, []string{"/usr/lib/<arch>-linux-<gnu>/"})
+	assert.EqualArrays(t, g[1].Arches, []string{"s390x"})
+	assert.EqualArrays(t, g[1].Uncovered, []string{"/usr/lib/s390x-linux-gnu/ld64.so.1"})
 }
 
 func TestGroupsSplitOnAnyDifference(t *testing.T) {

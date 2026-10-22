@@ -81,7 +81,7 @@ func Main(args []string) int {
 			return 2
 		}
 	} else {
-		renderText(os.Stdout, results, styleFor(os.Stdout))
+		renderText(os.Stdout, results, !f.NoGroup, styleFor(os.Stdout))
 	}
 
 	code := 0
@@ -104,6 +104,7 @@ type flags struct {
 	Arches        []string `long:"arch" value-name:"<a>[,<a>...]" description:"architectures to check; \"all\" for every one (default: host)"`
 	Slices        []string `long:"slice" value-name:"<s>[,<s>...]" description:"only these slices, bare or <package>_<slice> (default: all)"`
 	Ignores       []string `long:"ignore" value-name:"<glob>[,...]" description:"leave matching paths out of the uncovered set (chisel glob syntax)"`
+	NoGroup       bool     `long:"no-group" description:"one block per architecture with its real paths, instead of folding architectures with the same result"`
 	JSON          bool     `long:"json" description:"machine-readable output, one entry per architecture"`
 	FailUncovered bool     `long:"fail-uncovered" description:"exit 1 when any architecture has uncovered paths"`
 	Keep          bool     `long:"keep" description:"keep the temp releases and rootfs dirs"`
