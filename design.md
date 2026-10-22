@@ -61,7 +61,7 @@ on a warm cache a cut is well under a second, so the lead lane costs seconds per
 ## chisel
 
 - the binary is `$CHISEL`, else `chisel` on `PATH`. its full environment is passed through.
-- stdout and stderr of every cut are captured. a failed cut prints its command line and output and the run exits 2; `-v` streams every cut's output as it happens, prefixed with the architecture and slice.
+- stdout and stderr of every cut are captured. a failed cut prints its command line and output and the run exits 2. `-v` logs one line per finished cut on stderr (`26-10-22T09:34:09 arm64 ucf_cov-all 32p 1.1s`; `n/a` for a package missing on the arch, `0p` for a glob matching nothing, `error`), as do the `--keep` notices; `-vv` also streams every cut's output as it happens, with chisel's own timestamp dropped. every logged line is `<yy-mm-ddThh:mm:ss> <arch> <slice> <text>`, space-separated, with `-` for an arch or slice the line has none of, so `cut -d' '` works on all of them.
 - `cannot find package "<package>" in archive` on the `cov-all` cut means the package is not built for that architecture. that is a result ("not available"), not an error, and the lane skips the package's other cuts.
 - the version comes from chisel's `Fetching pool/.../<name>_<version>_<arch>.deb...` log line of the `cov-all` cut: the pool filename, so no epoch, plus the deb architecture (`all` or the real one). if the line is missing the version is unknown and nothing fails.
 - `--ignore unmaintained --ignore unstable` is always passed, so an old or devel release still cuts. an older chisel without `--ignore` fails every cut with its own "unknown flag" message, which the tool surfaces unchanged.
@@ -81,12 +81,13 @@ chisel-slice-coverage [flags] <package>...
                                architecture
       --fail-uncovered         exit 1 when any architecture has uncovered paths
       --keep                   keep the temp releases and rootfs dirs
-  -v, --verbose                stream chisel's output
+  -v, --verbose                one line per cut on stderr; twice also streams
+                               chisel's output
       --version                print the version and exit
   -h, --help                   this text
 ```
 
-flags are parsed by go-flags, the library chisel uses, so `--flag=value`, `--flag value` and flags after positionals behave as in chisel; `version` and `help` as the first argument are kept as `--version` / `--help` aliases. exit codes: 0 ran fine; 1 only with `--fail-uncovered`; 2 usage error, io error or a cut that failed. no colour, no default ignores.
+flags are parsed by go-flags, the library chisel uses, so `--flag=value`, `--flag value` and flags after positionals behave as in chisel; `version` and `help` as the first argument are kept as `--version` / `--help` aliases. exit codes: 0 ran fine; 1 only with `--fail-uncovered`; 2 usage error, io error or a cut that failed. no default ignores. the text report gets a little colour (bold blue name, dim arches, counts green when as hoped -- covered non-zero, ignored and uncovered zero -- else yellow, red for uncovered; yellow "not available", red "error") only when stdout is a terminal and `NO_COLOR` is unset or empty, per no-color.org; piped output is plain.
 
 ## report
 
@@ -94,21 +95,13 @@ text, to stdout. architectures with identical results share a block; identical m
 
 ```
 bash 5.2.21-2ubuntu4 [amd64, arm64]
-  total 42  covered 23  ignored 0  uncovered 19
-
-  uncovered:
-    /usr/share/man/man1/bash.1.gz
-    ...
-
-  slices:
-    bins (4):
-      /usr/bin/bash
-      ...
-
+total 42  covered 23  ignored 0  uncovered 19
+/usr/share/man/man1/bash.1.gz
+...
 bash [riscv64]: not available
 ```
 
-`--json` is per architecture, raw paths, no grouping:
+the text report is what is uncovered and nothing else: no indentation, no blank lines, so it pipes into other tools; what each slice takes is only in the json. `--json` is per architecture, raw paths, no grouping:
 
 ```json
 {"packages": [{"name": "bash", "arches": [

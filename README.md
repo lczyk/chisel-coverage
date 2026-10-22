@@ -1,6 +1,6 @@
 # chisel-slice-coverage
 
-development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture, and what each slice does take.
+development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture; `--json` also lists what each slice does take.
 
 ## why
 
@@ -15,24 +15,16 @@ chisel-slice-coverage --ignore '/usr/share/man/**,/usr/share/doc/**' bash
 
 ```
 bash 5.2.21-2ubuntu4 [amd64]
-  total 44  covered 16  ignored 19  uncovered 9
-
-  uncovered:
-    /usr/share/debianutils/
-    /usr/share/debianutils/shells.d/
-    /usr/share/debianutils/shells.d/bash
-    /usr/share/info/
-    /usr/share/lintian/
-    /usr/share/lintian/overrides/
-    /usr/share/lintian/overrides/bash
-    /usr/share/menu/
-    /usr/share/menu/bash
-
-  slices:
-    config (6):
-      /etc/
-      /etc/bash.bashrc
-      ...
+total 44  covered 16  ignored 19  uncovered 9
+/usr/share/debianutils/
+/usr/share/debianutils/shells.d/
+/usr/share/debianutils/shells.d/bash
+/usr/share/info/
+/usr/share/lintian/
+/usr/share/lintian/overrides/
+/usr/share/lintian/overrides/bash
+/usr/share/menu/
+/usr/share/menu/bash
 ```
 
 every entry of the deb counts, directories included; a directory is covered once anything under it is. `--arch all` checks every architecture, and architectures with the same result (after folding the multiarch triplet into `<arch>-linux-<gnu>`) share a block. several packages can be given at once. the `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`.
@@ -50,12 +42,13 @@ chisel-slice-coverage [flags] <package>...
                                architecture
       --fail-uncovered         exit 1 when any architecture has uncovered paths
       --keep                   keep the temp releases and rootfs dirs
-  -v, --verbose                stream chisel's output
+  -v, --verbose                one line per cut on stderr; twice also streams
+                               chisel's output
       --version                print the version and exit
   -h, --help                   this text
 ```
 
-`--ignore` only ever shrinks the uncovered set; a covered path that matches an ignore stays covered. the exit code is 0 unless something failed (2), or `--fail-uncovered` is given and paths are left (1), which makes it usable as a ci gate.
+`--ignore` only ever shrinks the uncovered set; a covered path that matches an ignore stays covered. the exit code is 0 unless something failed (2), or `--fail-uncovered` is given and paths are left (1), which makes it usable as a ci gate. the report is coloured a little when stdout is a terminal; set `NO_COLOR` to turn that off, and piped output is always plain.
 
 ## how it matches
 
