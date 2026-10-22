@@ -2,11 +2,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	goflags "github.com/jessevdk/go-flags"
 	"github.com/lczyk/chisel-proxy/pkg/deb"
 	ver "github.com/lczyk/version/go"
 
@@ -19,43 +21,48 @@ import (
 // paths with --fail-uncovered, 2 a usage error or a failed cut.
 func Main(args []string) int {
 	if len(args) == 0 {
-		usage(os.Stderr)
+		_, _, _ = parseArgs([]string{"--help"}, os.Stderr)
 		return 2
 	}
 	switch args[0] {
-	case "version", "--version":
-		fmt.Println(ver.Read(fileVersion(chiselslicecoverage.VersionFile)))
-		return 0
-	case "help", "--help", "-h":
-		usage(os.Stdout)
-		return 0
+	case "version":
+		args = []string{"--version"}
+	case "help":
+		args = []string{"--help"}
 	}
 
-	f, pkgs, err := parseArgs(args)
+	f, pkgs, err := parseArgs(args, os.Stdout)
 	if err != nil {
 		errf(err)
 		return 2
+	}
+	if f.help {
+		return 0
+	}
+	if f.Version {
+		fmt.Println(ver.Read(fileVersion(chiselslicecoverage.VersionFile)))
+		return 0
 	}
 	if len(pkgs) == 0 {
 		errf(fmt.Errorf("no packages given"))
 		return 2
 	}
-	arches, err := resolveArches(f.arches)
+	arches, err := resolveArches(f.Arches)
 	if err != nil {
 		errf(err)
 		return 2
 	}
 
 	runner := &cut.Runner{Bin: cut.Binary()}
-	if f.verbose {
+	if f.Verbose {
 		runner.Verbose = os.Stderr
 	}
 	results, err := coverage.Run(coverage.Options{
-		Release: f.release,
+		Release: f.Release,
 		Arches:  arches,
-		Only:    f.slices,
-		Ignores: f.ignores,
-		Keep:    f.keep,
+		Only:    f.Slices,
+		Ignores: f.Ignores,
+		Keep:    f.Keep,
 		Runner:  runner,
 		Log:     os.Stderr,
 	}, pkgs)
@@ -64,7 +71,7 @@ func Main(args []string) int {
 		return 2
 	}
 
-	if f.json {
+	if f.JSON {
 		if err := renderJSON(os.Stdout, results); err != nil {
 			errf(err)
 			return 2
@@ -79,7 +86,7 @@ func Main(args []string) int {
 			if a.Err != nil {
 				return 2
 			}
-			if f.failUncovered && len(a.Uncovered) > 0 {
+			if f.FailUncovered && len(a.Uncovered) > 0 {
 				code = 1
 			}
 		}
@@ -87,90 +94,71 @@ func Main(args []string) int {
 	return code
 }
 
+// flags is the command line; go-flags fills it and renders the help from it.
 type flags struct {
-	release       string
-	arches        []string
-	slices        []string
-	ignores       []string
-	json          bool
-	failUncovered bool
-	keep          bool
-	verbose       bool
+	Release       string   `long:"release" value-name:"<dir>" default:"." description:"chisel-releases checkout"`
+	Arches        []string `long:"arch" value-name:"<a>[,<a>...]" description:"architectures to check; \"all\" for every one (default: host)"`
+	Slices        []string `long:"slice" value-name:"<s>[,<s>...]" description:"only these slices, bare or <package>_<slice> (default: all)"`
+	Ignores       []string `long:"ignore" value-name:"<glob>[,...]" description:"leave matching paths out of the uncovered set (chisel glob syntax)"`
+	JSON          bool     `long:"json" description:"machine-readable output, one entry per architecture"`
+	FailUncovered bool     `long:"fail-uncovered" description:"exit 1 when any architecture has uncovered paths"`
+	Keep          bool     `long:"keep" description:"keep the temp releases and rootfs dirs"`
+	Verbose       bool     `short:"v" long:"verbose" description:"stream chisel's output"`
+	Version       bool     `long:"version" description:"print the version and exit"`
+
+	help bool // -h or --help was given
 }
 
-// parseArgs pulls recognised flags and the package positionals out of args.
-// List flags take comma-separated values and may repeat.
-func parseArgs(args []string) (f flags, pkgs []string, err error) {
-	f.release = "."
-	i := 0
-	for i < len(args) {
-		a := args[i]
-		if a == "-v" {
-			f.verbose = true
-			i++
-			continue
+func newParser(f *flags) *goflags.Parser {
+	p := goflags.NewNamedParser("chisel-slice-coverage", goflags.HelpFlag|goflags.PassDoubleDash)
+	p.Usage = "[flags] <package>..."
+	p.LongDescription = strings.TrimSpace(`
+for each package, every slice is cut on its own against a throwaway copy of
+the release with only that package in it, and so is one slice taking the whole
+.deb. what the whole-deb cut has and no slice cut has is uncovered. the
+"chisel" binary is found on PATH, or set CHISEL=/path/to/chisel. "version"
+and "help" as the first argument are --version and --help.`)
+	if _, err := p.AddGroup("flags", "", f); err != nil {
+		panic(err)
+	}
+	return p
+}
+
+// parseArgs parses the command line. List flags take comma-separated values
+// and may repeat; -h, --help and --version work wherever they land on the
+// line. Help is not an error: the usage goes to help, f.help is set and the
+// caller stops. The usage is written by the parser that ran, since go-flags
+// only renders defaults once it has parsed.
+func parseArgs(args []string, help io.Writer) (f flags, pkgs []string, err error) {
+	p := newParser(&f)
+	pkgs, err = p.ParseArgs(args)
+	if err != nil {
+		var fe *goflags.Error
+		if errors.As(err, &fe) && fe.Type == goflags.ErrHelp {
+			p.WriteHelp(help)
+			f.help = true
+			return f, nil, nil
 		}
-		if !strings.HasPrefix(a, "--") {
-			pkgs = append(pkgs, a)
-			i++
-			continue
-		}
-		key := a[2:]
-		val := ""
-		hasVal := false
-		if j := strings.IndexByte(key, '='); j >= 0 {
-			val, key, hasVal = key[j+1:], key[:j], true
-		}
-		need := func() (string, error) {
-			if hasVal {
-				return val, nil
-			}
-			if i+1 >= len(args) {
-				return "", fmt.Errorf("flag --%s needs a value", key)
-			}
-			i++
-			return args[i], nil
-		}
-		list := func(dst *[]string) error {
-			v, err := need()
-			if err != nil {
-				return err
-			}
-			for _, s := range strings.Split(v, ",") {
-				if s = strings.TrimSpace(s); s != "" {
-					*dst = append(*dst, s)
-				}
-			}
-			return nil
-		}
-		switch key {
-		case "release":
-			if f.release, err = need(); err != nil {
-				return f, nil, err
-			}
-		case "arch":
-			err = list(&f.arches)
-		case "slice":
-			err = list(&f.slices)
-		case "ignore":
-			err = list(&f.ignores)
-		case "json":
-			f.json = true
-		case "fail-uncovered":
-			f.failUncovered = true
-		case "keep":
-			f.keep = true
-		case "verbose":
-			f.verbose = true
-		default:
-			return f, nil, fmt.Errorf("unknown flag --%s", key)
-		}
-		if err != nil {
-			return f, nil, err
-		}
-		i++
+		return f, nil, err
+	}
+	for _, l := range []*[]string{&f.Arches, &f.Slices, &f.Ignores} {
+		*l = splitLists(*l)
 	}
 	return f, pkgs, nil
+}
+
+// splitLists splits every value of a repeatable list flag on commas and drops
+// the blanks, so --arch amd64,arm64 and --arch amd64 --arch arm64 are the same.
+func splitLists(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		for _, s := range strings.Split(v, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // resolveArches expands "all", defaults to the host and keeps the order given,
@@ -220,28 +208,4 @@ func fileVersion(content string) string {
 
 func errf(err error) {
 	fmt.Fprintf(os.Stderr, "chisel-slice-coverage: %v\n", err)
-}
-
-func usage(w io.Writer) {
-	fmt.Fprint(w, `chisel-slice-coverage - which paths of a .deb do its slices leave out
-
-usage:
-  chisel-slice-coverage [flags] <package>...
-  chisel-slice-coverage version
-
-flags:
-  --release <dir>        chisel-releases checkout (default ".")
-  --arch <a>[,<a>...]    architectures to check; "all" for every one (default: host)
-  --slice <s>[,<s>...]   only these slices, bare or <package>_<slice> (default: all)
-  --ignore <glob>[,...]  leave matching paths out of the uncovered set (chisel glob syntax)
-  --json                 machine-readable output, one entry per architecture
-  --fail-uncovered       exit 1 when any architecture has uncovered paths
-  --keep                 keep the temp releases and rootfs dirs
-  -v                     stream chisel's output
-
-for each package, every slice is cut on its own against a throwaway copy of
-the release with only that package in it, and so is one slice taking the whole
-.deb. what the whole-deb cut has and no slice cut has is uncovered. the
-"chisel" binary is found on PATH, or set CHISEL=/path/to/chisel.
-`)
 }

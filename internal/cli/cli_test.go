@@ -17,24 +17,39 @@ import (
 func TestParseArgs(t *testing.T) {
 	f, pkgs, err := parseArgs([]string{"--release", "/r", "--arch", "amd64,arm64", "--arch=s390x", "-v",
 		"bash", "--slice", "bins", "--ignore", "/usr/share/doc/**,/usr/share/man/**", "--json",
-		"--fail-uncovered", "--keep", "coreutils"})
+		"--fail-uncovered", "--keep", "coreutils"}, io.Discard)
 	assert.NoError(t, err)
 	assert.EqualArrays(t, pkgs, []string{"bash", "coreutils"})
-	assert.Equal(t, f.release, "/r")
-	assert.EqualArrays(t, f.arches, []string{"amd64", "arm64", "s390x"})
-	assert.EqualArrays(t, f.slices, []string{"bins"})
-	assert.EqualArrays(t, f.ignores, []string{"/usr/share/doc/**", "/usr/share/man/**"})
-	assert.That(t, f.json && f.failUncovered && f.keep && f.verbose)
+	assert.Equal(t, f.Release, "/r")
+	assert.EqualArrays(t, f.Arches, []string{"amd64", "arm64", "s390x"})
+	assert.EqualArrays(t, f.Slices, []string{"bins"})
+	assert.EqualArrays(t, f.Ignores, []string{"/usr/share/doc/**", "/usr/share/man/**"})
+	assert.That(t, f.JSON && f.FailUncovered && f.Keep && f.Verbose)
 
-	f, _, err = parseArgs([]string{"bash"})
+	f, _, err = parseArgs([]string{"bash"}, io.Discard)
 	assert.NoError(t, err)
-	assert.Equal(t, f.release, ".")
-	assert.Nil(t, f.arches)
+	assert.Equal(t, f.Release, ".")
+	assert.Nil(t, f.Arches)
 
-	_, _, err = parseArgs([]string{"--arch"})
-	assert.Error(t, err, "needs a value")
-	_, _, err = parseArgs([]string{"--nope", "bash"})
-	assert.Error(t, err, "unknown flag --nope")
+	_, _, err = parseArgs([]string{"--arch"}, io.Discard)
+	assert.Error(t, err, "expected argument for flag `--arch'")
+	_, _, err = parseArgs([]string{"--nope", "bash"}, io.Discard)
+	assert.Error(t, err, "unknown flag `nope'")
+	_, _, err = parseArgs([]string{"-x", "bash"}, io.Discard)
+	assert.Error(t, err, "unknown flag `x'")
+	_, pkgs, err = parseArgs([]string{"--json"}, io.Discard)
+	assert.NoError(t, err)
+	assert.Len(t, pkgs, 0)
+
+	var help bytes.Buffer
+	f, _, err = parseArgs([]string{"--release", "/r", "-h"}, &help)
+	assert.NoError(t, err)
+	assert.That(t, f.help && !f.Version)
+	assert.ContainsString(t, help.String(), "--release=<dir>")
+	assert.ContainsString(t, help.String(), "(default: .)")
+	f, _, err = parseArgs([]string{"bash", "--version"}, io.Discard)
+	assert.NoError(t, err)
+	assert.That(t, f.Version && !f.help)
 }
 
 func TestResolveArches(t *testing.T) {
@@ -234,9 +249,14 @@ func TestMainExitCodes(t *testing.T) {
 	code, out = captureStdout(t, func() int { return Main([]string{"version"}) })
 	assert.Equal(t, code, 0)
 	assert.ContainsString(t, out, "0.1.0")
-	code, out = captureStdout(t, func() int { return Main([]string{"help"}) })
+	for _, args := range [][]string{{"help"}, {"--help"}, {"--release", rel, "-h"}, {"demo", "--help"}} {
+		code, out = captureStdout(t, func() int { return Main(args) })
+		assert.Equal(t, code, 0, args)
+		assert.ContainsString(t, out, "Usage:", args)
+	}
+	code, out = captureStdout(t, func() int { return Main([]string{"--release", rel, "--version"}) })
 	assert.Equal(t, code, 0)
-	assert.ContainsString(t, out, "usage:")
+	assert.ContainsString(t, out, "0.1.0")
 }
 
 func TestFileVersion(t *testing.T) {
