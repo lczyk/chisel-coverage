@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Binary returns the chisel binary to run: $CHISEL, else "chisel" on PATH.
@@ -27,7 +28,8 @@ func Binary() string {
 }
 
 // Runner runs chisel. Verbose, when set, receives every cut's output as it
-// happens, each line prefixed with the architecture and slice.
+// happens, each line as "<stamp> <arch> <slice> <text>" with chisel's own
+// timestamp stripped.
 type Runner struct {
 	Bin     string
 	Verbose io.Writer
@@ -84,7 +86,7 @@ func (r *Runner) Cut(release, root, arch, slice string) (*Result, error) {
 	var out bytes.Buffer
 	var w io.Writer = &out
 	if r.Verbose != nil {
-		w = io.MultiWriter(&out, &prefixWriter{w: r.Verbose, prefix: "[" + arch + " " + slice + "] "})
+		w = io.MultiWriter(&out, &prefixWriter{w: r.Verbose, prefix: arch + " " + slice + " "})
 	}
 	cmd.Stdout = w
 	cmd.Stderr = w
@@ -145,8 +147,19 @@ func Walk(root string) ([]string, error) {
 	return paths, nil
 }
 
-// prefixWriter prefixes every line it is handed. Lanes write concurrently, so
-// each line is written to the underlying writer in one call.
+// Stamp is the timestamp every line the tool logs starts with. A logged line
+// is "<stamp> <arch> <slice> <text>", space-separated, with "-" standing in
+// for an architecture or slice the line has none of, so the columns are fixed.
+func Stamp() string {
+	return time.Now().Format("06-01-02T15:04:05")
+}
+
+// The timestamp chisel's logger puts in front of every line.
+var chiselStamp = regexp.MustCompile(`^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d `)
+
+// prefixWriter stamps and prefixes every line it is handed and drops chisel's
+// timestamp. Lanes write concurrently, so each line is written to the
+// underlying writer in one call.
 type prefixWriter struct {
 	w      io.Writer
 	prefix string
@@ -163,8 +176,8 @@ func (p *prefixWriter) Write(b []byte) (int, error) {
 		if i < 0 {
 			return len(b), nil
 		}
-		line := p.rest[:i+1]
-		if _, err := fmt.Fprintf(p.w, "%s%s", p.prefix, line); err != nil {
+		line := chiselStamp.ReplaceAll(p.rest[:i+1], nil)
+		if _, err := fmt.Fprintf(p.w, "%s %s%s", Stamp(), p.prefix, line); err != nil {
 			return 0, err
 		}
 		p.rest = p.rest[i+1:]

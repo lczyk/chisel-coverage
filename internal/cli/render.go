@@ -4,37 +4,79 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/lczyk/chisel-slice-coverage/internal/coverage"
 )
 
+// style colours the text report. The zero value colours nothing.
+type style struct {
+	name, dim, red, green, yellow, reset string
+}
+
+// colours is the style for a terminal: a little, not a lot.
+var colours = style{name: "\x1b[1;34m", dim: "\x1b[2m", red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m", reset: "\x1b[0m"}
+
+// styleFor picks colours when w is a terminal and NO_COLOR is unset or empty
+// (https://no-color.org), else nothing.
+func styleFor(w io.Writer) style {
+	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
+		return style{}
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return style{}
+	}
+	fi, err := f.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return style{}
+	}
+	return colours
+}
+
+func (s style) wrap(code, text string) string {
+	if code == "" {
+		return text
+	}
+	return code + text + s.reset
+}
+
+// count renders "<label> <n>" green when n is what one hopes for (non-zero
+// for covered, zero for ignored and uncovered), else warn (yellow for
+// covered and ignored, red for uncovered).
+func (s style) count(label string, n int, wantZero bool, warn string) string {
+	text := fmt.Sprintf("%s %d", label, n)
+	if (n == 0) == wantZero {
+		return s.wrap(s.green, text)
+	}
+	return s.wrap(warn, text)
+}
+
 // renderText prints one block per group of architectures with the same
-// result, per package.
-func renderText(w io.Writer, pkgs []coverage.Package) {
-	first := true
+// result, per package: a header line, a counts line, then the uncovered paths
+// one per line. Nothing is indented and no line is blank, so the output greps
+// and pipes. What each slice takes is only in the JSON.
+func renderText(w io.Writer, pkgs []coverage.Package, s style) {
 	for _, p := range pkgs {
 		for _, g := range coverage.Groups(p) {
-			if !first {
-				fmt.Fprintln(w)
-			}
-			first = false
-			renderGroup(w, p, g)
+			renderGroup(w, p, g, s)
 		}
 	}
 }
 
-func renderGroup(w io.Writer, p coverage.Package, g coverage.Group) {
-	arches := "[" + strings.Join(g.Arches, ", ") + "]"
+func renderGroup(w io.Writer, p coverage.Package, g coverage.Group, s style) {
+	name := s.wrap(s.name, p.Name)
+	arches := s.wrap(s.dim, "["+strings.Join(g.Arches, ", ")+"]")
 	switch {
 	case g.Err != nil:
-		fmt.Fprintf(w, "%s %s: error\n  %s\n", p.Name, arches, strings.ReplaceAll(g.Err.Error(), "\n", "\n  "))
+		fmt.Fprintf(w, "%s %s: %s\n  %s\n", name, arches, s.wrap(s.red, "error"), strings.ReplaceAll(g.Err.Error(), "\n", "\n  "))
 		return
 	case !g.Available:
-		fmt.Fprintf(w, "%s %s: not available\n", p.Name, arches)
+		fmt.Fprintf(w, "%s %s: %s\n", name, arches, s.wrap(s.yellow, "not available"))
 		return
 	}
-	head := p.Name
+	head := name
 	if g.Version != "" {
 		head += " " + g.Version
 		if g.DebArch == "all" {
@@ -42,25 +84,12 @@ func renderGroup(w io.Writer, p coverage.Package, g coverage.Group) {
 		}
 	}
 	fmt.Fprintf(w, "%s %s\n", head, arches)
-	fmt.Fprintf(w, "  total %d  covered %d  ignored %d  uncovered %d\n",
-		g.Total, len(g.Covered), len(g.Ignored), len(g.Uncovered))
-	if len(g.Uncovered) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "  uncovered:")
-		for _, path := range g.Uncovered {
-			fmt.Fprintf(w, "    %s\n", path)
-		}
-	}
-	if len(p.Slices) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "  slices:")
-		for _, name := range p.Slices {
-			paths := g.Slices[name]
-			fmt.Fprintf(w, "    %s (%d):\n", name, len(paths))
-			for _, path := range paths {
-				fmt.Fprintf(w, "      %s\n", path)
-			}
-		}
+	fmt.Fprintf(w, "total %d  %s  %s  %s\n", g.Total,
+		s.count("covered", len(g.Covered), false, s.yellow),
+		s.count("ignored", len(g.Ignored), true, s.yellow),
+		s.count("uncovered", len(g.Uncovered), true, s.red))
+	for _, path := range g.Uncovered {
+		fmt.Fprintln(w, path)
 	}
 }
 

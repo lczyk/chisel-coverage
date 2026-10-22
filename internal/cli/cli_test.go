@@ -24,7 +24,12 @@ func TestParseArgs(t *testing.T) {
 	assert.EqualArrays(t, f.Arches, []string{"amd64", "arm64", "s390x"})
 	assert.EqualArrays(t, f.Slices, []string{"bins"})
 	assert.EqualArrays(t, f.Ignores, []string{"/usr/share/doc/**", "/usr/share/man/**"})
-	assert.That(t, f.JSON && f.FailUncovered && f.Keep && f.Verbose)
+	assert.That(t, f.JSON && f.FailUncovered && f.Keep)
+	assert.Len(t, f.Verbose, 1)
+
+	f, _, err = parseArgs([]string{"-vv", "bash"}, io.Discard)
+	assert.NoError(t, err)
+	assert.Len(t, f.Verbose, 2)
 
 	f, _, err = parseArgs([]string{"bash"}, io.Discard)
 	assert.NoError(t, err)
@@ -88,39 +93,58 @@ func sample() []coverage.Package {
 			Covered: []string{"/usr/"}, Uncovered: []string{}, Ignored: []string{},
 			Slices: map[string][]string{"zones": {"/usr/"}},
 		}}},
+		{Name: "empty", Arches: []coverage.Arch{{
+			Arch: "amd64", Available: true, Covered: []string{}, Uncovered: []string{}, Ignored: []string{},
+			Slices: map[string][]string{},
+		}}},
 	}
 }
 
 func TestRenderText(t *testing.T) {
 	var out bytes.Buffer
-	renderText(&out, sample())
+	renderText(&out, sample(), style{})
 	assert.Equal(t, out.String(), `bash 5.2-1 [amd64, arm64]
-  total 6  covered 3  ignored 1  uncovered 2
-
-  uncovered:
-    /usr/lib/
-    /usr/lib/<arch>-linux-<gnu>/
-
-  slices:
-    bins (3):
-      /usr/
-      /usr/bin/
-      /usr/bin/bash
-    scripts (0):
-
+total 6  covered 3  ignored 1  uncovered 2
+/usr/lib/
+/usr/lib/<arch>-linux-<gnu>/
 bash [i386]: not available
-
 bash [s390x]: error
   chisel cut ... exited 1
     boom
-
 tzdata 2026a-1 (all) [amd64]
-  total 1  covered 1  ignored 0  uncovered 0
-
-  slices:
-    zones (1):
-      /usr/
+total 1  covered 1  ignored 0  uncovered 0
+empty [amd64]
+total 0  covered 0  ignored 0  uncovered 0
 `)
+}
+
+func TestRenderTextColoured(t *testing.T) {
+	var out bytes.Buffer
+	renderText(&out, sample(), colours)
+	assert.ContainsString(t, out.String(), "\x1b[1;34mbash\x1b[0m 5.2-1 \x1b[2m[amd64, arm64]\x1b[0m\n")
+	assert.ContainsString(t, out.String(), "total 6  \x1b[32mcovered 3\x1b[0m  \x1b[33mignored 1\x1b[0m  \x1b[31muncovered 2\x1b[0m\n/usr/lib/\n")
+	assert.ContainsString(t, out.String(), "total 1  \x1b[32mcovered 1\x1b[0m  \x1b[32mignored 0\x1b[0m  \x1b[32muncovered 0\x1b[0m\n")
+	assert.ContainsString(t, out.String(), "total 0  \x1b[33mcovered 0\x1b[0m  ")
+	assert.ContainsString(t, out.String(), ": \x1b[33mnot available\x1b[0m\n")
+	assert.ContainsString(t, out.String(), ": \x1b[31merror\x1b[0m\n")
+}
+
+func TestStyleFor(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm")
+	assert.Equal(t, styleFor(&bytes.Buffer{}), style{})
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	assert.NoError(t, err)
+	defer f.Close()
+	assert.Equal(t, styleFor(f), style{})
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		t.Skip("no /dev/tty")
+	}
+	defer tty.Close()
+	assert.Equal(t, styleFor(tty), colours)
+	t.Setenv("NO_COLOR", "1")
+	assert.Equal(t, styleFor(tty), style{})
 }
 
 func TestRenderJSON(t *testing.T) {
@@ -142,7 +166,7 @@ func TestRenderJSON(t *testing.T) {
 		} `json:"packages"`
 	}
 	assert.NoError(t, json.Unmarshal(out.Bytes(), &doc))
-	assert.Len(t, doc.Packages, 2)
+	assert.Len(t, doc.Packages, 3)
 	bash := doc.Packages[0]
 	assert.Len(t, bash.Arches, 4)
 	// Raw paths, every architecture on its own.
@@ -210,8 +234,8 @@ func TestMainExitCodes(t *testing.T) {
 
 	code, out := captureStdout(t, func() int { return Main([]string{"--release", rel, "--arch", "amd64", "demo"}) })
 	assert.Equal(t, code, 0)
-	assert.ContainsString(t, out, "demo [amd64]\n  total 7  covered 3  ignored 0  uncovered 4\n")
-	assert.ContainsString(t, out, "    /usr/share/doc/demo/README\n")
+	assert.ContainsString(t, out, "demo [amd64]\ntotal 7  covered 3  ignored 0  uncovered 4\n")
+	assert.ContainsString(t, out, "\n/usr/share/doc/demo/README\n")
 
 	code, _ = captureStdout(t, func() int {
 		return Main([]string{"--release", rel, "--arch", "amd64", "--fail-uncovered", "demo"})

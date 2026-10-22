@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/lczyk/assert"
@@ -80,15 +81,22 @@ func TestCutClassifiesFailures(t *testing.T) {
 	assert.ContainsString(t, err.Error(), "matched nothing\n  error: cannot extract")
 }
 
+// stamped matches the timestamp every logged line starts with.
+var stamped = regexp.MustCompile(`(?m)^\d\d-\d\d-\d\dT\d\d:\d\d:\d\d `)
+
+func TestStamp(t *testing.T) {
+	assert.That(t, stamped.MatchString(Stamp()+" "), Stamp())
+}
+
 func TestCutVerboseStreamsPrefixed(t *testing.T) {
 	r := fake(t)
 	var out bytes.Buffer
 	r.Verbose = &out
 	t.Setenv("FAKE_CODE", "0")
-	t.Setenv("FAKE_SAYS", "one\ntwo")
+	t.Setenv("FAKE_SAYS", "2026/10/22 09:29:39 one\ntwo")
 	_, err := r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "arm64", "demo_bins")
 	assert.NoError(t, err)
-	assert.Equal(t, out.String(), "[arm64 demo_bins] one\n[arm64 demo_bins] two\n")
+	assert.Equal(t, stamped.ReplaceAllString(out.String(), ""), "arm64 demo_bins one\narm64 demo_bins two\n")
 }
 
 func TestPrefixWriterSplitsAcrossWrites(t *testing.T) {
@@ -97,7 +105,7 @@ func TestPrefixWriterSplitsAcrossWrites(t *testing.T) {
 	_, _ = p.Write([]byte("ab"))
 	_, _ = p.Write([]byte("c\nd\ne"))
 	_, _ = p.Write([]byte("\n"))
-	assert.Equal(t, out.String(), "> abc\n> d\n> e\n")
+	assert.Equal(t, stamped.ReplaceAllString(out.String(), ""), "> abc\n> d\n> e\n")
 }
 
 func TestWalk(t *testing.T) {

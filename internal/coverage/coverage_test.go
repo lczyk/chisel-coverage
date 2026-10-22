@@ -3,6 +3,7 @@ package coverage
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -283,6 +284,32 @@ func TestRunLanesNeverOverlapAndLeadGoesFirst(t *testing.T) {
 	assert.Equal(t, lead, 2*4)
 }
 
+// stamped matches the timestamp every line of the tool's own log starts with.
+var stamped = regexp.MustCompile(`^\d\d-\d\d-\d\dT\d\d:\d\d:\d\d `)
+
+func TestRunVerbose(t *testing.T) {
+	f := setup(t)
+	t.Setenv("FAKE_NOCONTENT", "bash_cov-ignore-0")
+	t.Setenv("FAKE_FAIL", "bash_copyright")
+	var out strings.Builder
+	_, err := Run(Options{Release: f.release, Arches: []string{"amd64", "riscv64"}, Ignores: []string{"/nope/**"}, Runner: f.runner, Verbose: &out}, []string{"bash"})
+	assert.NoError(t, err)
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		assert.That(t, stamped.MatchString(l), l)
+		lines = append(lines, took.ReplaceAllString(stamped.ReplaceAllString(l, ""), ""))
+	}
+	assert.EqualArrays(t, lines, []string{
+		"amd64 bash_cov-all 19p",
+		"amd64 bash_config 3p",
+		"amd64 bash_bins 4p",
+		"amd64 bash_copyright error",
+		"riscv64 bash_cov-all n/a",
+	})
+}
+
+var took = regexp.MustCompile(` \d+\.\ds$`)
+
 func TestRunKeep(t *testing.T) {
 	f := setup(t)
 	var log strings.Builder
@@ -290,8 +317,12 @@ func TestRunKeep(t *testing.T) {
 	assert.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(log.String()), "\n")
 	assert.Len(t, lines, 2)
-	rel := strings.TrimPrefix(lines[0], "[chisel-slice-coverage] release for bash: ")
-	work := strings.TrimPrefix(lines[1], "[chisel-slice-coverage] rootfs dirs: ")
+	for i, l := range lines {
+		assert.That(t, stamped.MatchString(l), l)
+		lines[i] = stamped.ReplaceAllString(l, "")
+	}
+	rel := strings.TrimPrefix(lines[0], "- - release for bash: ")
+	work := strings.TrimPrefix(lines[1], "- - rootfs dirs: ")
 	defer os.RemoveAll(rel)
 	defer os.RemoveAll(work)
 	_, err = os.Stat(filepath.Join(rel, "slices", "bash.yaml"))

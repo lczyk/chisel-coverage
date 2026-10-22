@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	temprelease "github.com/lczyk/chisel-proxy/pkg/temp-release"
 
@@ -33,6 +34,7 @@ type Options struct {
 	Keep    bool
 	Runner  *cut.Runner
 	Log     io.Writer // --keep notices; nil discards
+	Verbose io.Writer // one line per cut; nil discards
 }
 
 // Arch is one package's coverage on one architecture.
@@ -231,7 +233,9 @@ func (r *run) cutPackage(p *prepared, arch string) Arch {
 	sets := map[string][]string{}
 	for _, name := range p.cuts {
 		root := filepath.Join(r.work, p.def.Package, arch, name)
+		start := time.Now()
 		res, err := r.opts.Runner.Cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
+		r.cutf(arch, p.def.Package+"_"+name, res, err, time.Since(start))
 		if !r.opts.Keep {
 			_ = os.RemoveAll(root)
 		}
@@ -300,10 +304,37 @@ func (r *run) cleanup() {
 	}
 }
 
+// cutf reports one finished cut on the Verbose writer as
+// "<arch> <slice> <paths>p <seconds>s"; a package missing for the
+// architecture is "n/a", a glob matching nothing "0p", a failure "error".
+func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Duration) {
+	if r.opts.Verbose == nil {
+		return
+	}
+	var what string
+	switch {
+	case errors.Is(err, cut.ErrNotAvailable):
+		what = "n/a"
+	case errors.Is(err, cut.ErrNoContent):
+		what = "0p"
+	case err != nil:
+		what = "error"
+	default:
+		what = fmt.Sprintf("%dp", len(res.Paths))
+	}
+	stampf(r.opts.Verbose, "%s %s %s %.1fs", arch, slice, what, took.Seconds())
+}
+
 func (r *run) logf(format string, args ...any) {
 	if r.opts.Log != nil {
-		fmt.Fprintf(r.opts.Log, "[chisel-slice-coverage] "+format+"\n", args...)
+		stampf(r.opts.Log, "- - "+format, args...)
 	}
+}
+
+// stampf writes one timestamped line in a single call, since lanes log
+// concurrently. See cut.Stamp for the line format.
+func stampf(w io.Writer, format string, args ...any) {
+	fmt.Fprintf(w, "%s "+format+"\n", append([]any{cut.Stamp()}, args...)...)
 }
 
 // The multiarch triplet of each architecture.

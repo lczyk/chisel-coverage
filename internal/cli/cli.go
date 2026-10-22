@@ -54,10 +54,7 @@ func Main(args []string) int {
 	}
 
 	runner := &cut.Runner{Bin: cut.Binary()}
-	if f.Verbose {
-		runner.Verbose = os.Stderr
-	}
-	results, err := coverage.Run(coverage.Options{
+	opts := coverage.Options{
 		Release: f.Release,
 		Arches:  arches,
 		Only:    f.Slices,
@@ -65,7 +62,14 @@ func Main(args []string) int {
 		Keep:    f.Keep,
 		Runner:  runner,
 		Log:     os.Stderr,
-	}, pkgs)
+	}
+	if len(f.Verbose) >= 1 {
+		opts.Verbose = os.Stderr
+	}
+	if len(f.Verbose) >= 2 {
+		runner.Verbose = os.Stderr
+	}
+	results, err := coverage.Run(opts, pkgs)
 	if err != nil {
 		errf(err)
 		return 2
@@ -77,7 +81,7 @@ func Main(args []string) int {
 			return 2
 		}
 	} else {
-		renderText(os.Stdout, results)
+		renderText(os.Stdout, results, styleFor(os.Stdout))
 	}
 
 	code := 0
@@ -103,7 +107,7 @@ type flags struct {
 	JSON          bool     `long:"json" description:"machine-readable output, one entry per architecture"`
 	FailUncovered bool     `long:"fail-uncovered" description:"exit 1 when any architecture has uncovered paths"`
 	Keep          bool     `long:"keep" description:"keep the temp releases and rootfs dirs"`
-	Verbose       bool     `short:"v" long:"verbose" description:"stream chisel's output"`
+	Verbose       []bool   `short:"v" long:"verbose" description:"one line per cut on stderr; twice also streams chisel's output"`
 	Version       bool     `long:"version" description:"print the version and exit"`
 
 	help bool // -h or --help was given
