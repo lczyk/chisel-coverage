@@ -70,18 +70,23 @@ on a warm cache a cut is well under a second, so the lead lane costs seconds per
 
 ```
 chisel-slice-coverage [flags] <package>...
-  --release <dir>       chisel-releases checkout (default ".")
-  --arch <a>[,<a>...]   repeatable; "all" = all seven; default: host
-  --slice <s>[,...]     repeatable; bare or <package>_<slice>; default: all
-  --ignore <glob>[,...] repeatable; chisel glob syntax
-  --json                machine output instead of text
-  --fail-uncovered      exit 1 when any architecture has uncovered paths
-  --keep                keep the temp releases and rootfs dirs
-  -v                    stream chisel output
-  version | help
+      --release=<dir>          chisel-releases checkout (default: .)
+      --arch=<a>[,<a>...]      architectures to check; "all" for every one
+                               (default: host)
+      --slice=<s>[,<s>...]     only these slices, bare or <package>_<slice>
+                               (default: all)
+      --ignore=<glob>[,...]    leave matching paths out of the uncovered set
+                               (chisel glob syntax)
+      --json                   machine-readable output, one entry per
+                               architecture
+      --fail-uncovered         exit 1 when any architecture has uncovered paths
+      --keep                   keep the temp releases and rootfs dirs
+  -v, --verbose                stream chisel's output
+      --version                print the version and exit
+  -h, --help                   this text
 ```
 
-exit codes: 0 ran fine; 1 only with `--fail-uncovered`; 2 usage error, io error or a cut that failed. no colour, no default ignores.
+flags are parsed by go-flags, the library chisel uses, so `--flag=value`, `--flag value` and flags after positionals behave as in chisel; `version` and `help` as the first argument are kept as `--version` / `--help` aliases. exit codes: 0 ran fine; 1 only with `--fail-uncovered`; 2 usage error, io error or a cut that failed. no colour, no default ignores.
 
 ## report
 
@@ -121,7 +126,7 @@ mirrors chisel-proxy: `cmd/`, `internal/{cli,sdf,cut,coverage}`, `version.go` + 
 - `internal/coverage` -- lanes, set arithmetic, normalisation and grouping.
 - `internal/cli` -- flags, text and json rendering, exit codes.
 
-deps: `gopkg.in/yaml.v3`, `github.com/lczyk/chisel-proxy/pkg` (`temp-release`; `deb` and `apt` in tests), `github.com/lczyk/assert`, `github.com/lczyk/version/go`.
+deps: `github.com/jessevdk/go-flags` (what chisel uses), `gopkg.in/yaml.v3`, `github.com/lczyk/chisel-proxy/pkg` (`temp-release`; `deb` and `apt` in tests), `github.com/lczyk/assert`, `github.com/lczyk/version/go`.
 
 ## testing
 

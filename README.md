@@ -39,14 +39,20 @@ every entry of the deb counts, directories included; a directory is covered once
 
 ```
 chisel-slice-coverage [flags] <package>...
-  --release <dir>        chisel-releases checkout (default ".")
-  --arch <a>[,<a>...]    architectures to check; "all" for every one (default: host)
-  --slice <s>[,<s>...]   only these slices, bare or <package>_<slice> (default: all)
-  --ignore <glob>[,...]  leave matching paths out of the uncovered set (chisel glob syntax)
-  --json                 machine-readable output, one entry per architecture
-  --fail-uncovered       exit 1 when any architecture has uncovered paths
-  --keep                 keep the temp releases and rootfs dirs
-  -v                     stream chisel's output
+      --release=<dir>          chisel-releases checkout (default: .)
+      --arch=<a>[,<a>...]      architectures to check; "all" for every one
+                               (default: host)
+      --slice=<s>[,<s>...]     only these slices, bare or <package>_<slice>
+                               (default: all)
+      --ignore=<glob>[,...]    leave matching paths out of the uncovered set
+                               (chisel glob syntax)
+      --json                   machine-readable output, one entry per
+                               architecture
+      --fail-uncovered         exit 1 when any architecture has uncovered paths
+      --keep                   keep the temp releases and rootfs dirs
+  -v, --verbose                stream chisel's output
+      --version                print the version and exit
+  -h, --help                   this text
 ```
 
 `--ignore` only ever shrinks the uncovered set; a covered path that matches an ignore stays covered. the exit code is 0 unless something failed (2), or `--fail-uncovered` is given and paths are left (1), which makes it usable as a ci gate.
