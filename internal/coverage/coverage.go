@@ -4,6 +4,7 @@
 package coverage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -70,6 +71,7 @@ type prepared struct {
 }
 
 type run struct {
+	ctx      context.Context
 	opts     Options
 	work     string
 	prepared []*prepared
@@ -111,8 +113,9 @@ type worker struct {
 // Run cuts every package on every architecture and returns the results in
 // input order, a package given twice once. It fails up front on a bad
 // release, a bad slice definition or an unknown --slice; a failed cut is
-// reported per architecture instead.
-func Run(opts Options, pkgs []string) ([]Package, error) {
+// reported per architecture instead. When ctx is done the cuts stop, the
+// temp dirs and cache views go, and the error is ctx's.
+func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 	if len(pkgs) == 0 {
 		return nil, fmt.Errorf("no packages given")
 	}
@@ -129,7 +132,7 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{opts: opts, jobs: jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), start: time.Now()}
+	r := &run{ctx: ctx, opts: opts, jobs: jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), start: time.Now()}
 	defer r.cleanup()
 	if r.jobs > 1 && opts.Cache != "" {
 		r.viewCost = cache.Cost(opts.Cache)
@@ -164,6 +167,9 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 		}
 	}
 	r.phase(rest)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.removeViews()
 	r.verbosef("%d cuts %d paths %.1fmb %.1fs", r.cuts, r.paths, float64(r.bytes)/1e6, time.Since(r.start).Seconds())
 	return r.results, nil
@@ -319,8 +325,13 @@ func (r *run) phase(units []unit) {
 			}
 		}()
 	}
+units:
 	for _, u := range units {
-		next <- u
+		select {
+		case next <- u:
+		case <-r.ctx.Done():
+			break units
+		}
 	}
 	close(next)
 	wg.Wait()
@@ -386,7 +397,7 @@ func (w *worker) prepare(arch, pkg string) {
 }
 
 func (w *worker) cut(release, root, arch, slice string) (*cut.Result, error) {
-	return w.runner.Cut(release, root, arch, slice)
+	return w.runner.Cut(w.r.ctx, release, root, arch, slice)
 }
 
 // merge publishes what the worker's view fetched into the shared cache.

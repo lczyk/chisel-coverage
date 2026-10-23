@@ -2,6 +2,7 @@ package cut
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -36,7 +37,7 @@ func TestCutWalksAndReadsVersion(t *testing.T) {
 	r := fake(t)
 	t.Setenv("FAKE_CODE", "0")
 	t.Setenv("FAKE_SAYS", "2026/01/01 00:00:00 Fetching pool/main/d/demo/demo_1.0-1ubuntu2_all.deb...")
-	res, err := r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	res, err := r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	assert.NoError(t, err)
 	assert.EqualArrays(t, res.Paths, []string{"/usr/", "/usr/bin/", "/usr/bin/d", "/usr/bin/demo"})
 	assert.Equal(t, res.Version, "1.0-1ubuntu2")
@@ -47,13 +48,13 @@ func TestCutVersionIsThisPackagesOnly(t *testing.T) {
 	r := fake(t)
 	t.Setenv("FAKE_CODE", "0")
 	t.Setenv("FAKE_SAYS", "Fetching pool/main/o/other/other_9_amd64.deb...\nFetching pool/main/d/demo/demo_2.0_amd64.deb...")
-	res, err := r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	res, err := r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	assert.NoError(t, err)
 	assert.Equal(t, res.Version, "2.0")
 	assert.Equal(t, res.DebArch, "amd64")
 
 	t.Setenv("FAKE_SAYS", "nothing fetched")
-	res, err = r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	res, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	assert.NoError(t, err)
 	assert.Equal(t, res.Version, "")
 }
@@ -62,12 +63,12 @@ func TestCutClassifiesFailures(t *testing.T) {
 	r := fake(t)
 	t.Setenv("FAKE_CODE", "1")
 	t.Setenv("FAKE_SAYS", `error: cannot find package "demo" in archive(s)`)
-	_, err := r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	_, err := r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	assert.ErrorIs(t, err, ErrNotAvailable)
 
 	// The same text about another package is not this package's absence.
 	t.Setenv("FAKE_SAYS", `error: cannot find package "libc6" in archive(s)`)
-	_, err = r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	var ce *Error
 	assert.That(t, errors.As(err, &ce))
 	assert.Equal(t, ce.Args[1], "cut")
@@ -75,7 +76,7 @@ func TestCutClassifiesFailures(t *testing.T) {
 	assert.ContainsString(t, err.Error(), "exit status 1\n  error: cannot find package")
 
 	t.Setenv("FAKE_SAYS", `error: cannot extract from package "demo": no content at /usr/share/man/**`)
-	_, err = r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	assert.ErrorIs(t, err, ErrNoContent)
 	assert.That(t, errors.As(err, &ce))
 	assert.ContainsString(t, err.Error(), "matched nothing\n  error: cannot extract")
@@ -94,7 +95,7 @@ func TestCutVerboseStreamsPrefixed(t *testing.T) {
 	r.Verbose = &out
 	t.Setenv("FAKE_CODE", "0")
 	t.Setenv("FAKE_SAYS", "2026/10/22 09:29:39 one\ntwo")
-	_, err := r.Cut("/rel", filepath.Join(t.TempDir(), "root"), "arm64", "demo_bins")
+	_, err := r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "arm64", "demo_bins")
 	assert.NoError(t, err)
 	assert.Equal(t, stamped.ReplaceAllString(out.String(), ""), "arm64 demo_bins one\narm64 demo_bins two\n")
 }

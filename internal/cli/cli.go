@@ -2,11 +2,14 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	goflags "github.com/jessevdk/go-flags"
 	"github.com/lczyk/chisel-proxy/pkg/deb"
@@ -19,7 +22,8 @@ import (
 )
 
 // Main runs the CLI and returns a process exit code: 0 ran fine, 1 uncovered
-// paths with --fail-uncovered, 2 a usage error or a failed cut.
+// paths with --fail-uncovered, 2 a usage error or a failed cut, 130
+// interrupted.
 func Main(args []string) int {
 	if len(args) == 0 {
 		_, _, _ = parseArgs([]string{"--help"}, os.Stderr)
@@ -76,7 +80,19 @@ func Main(args []string) int {
 	if len(f.Verbose) >= 2 {
 		runner.Verbose = os.Stderr
 	}
-	results, err := coverage.Run(opts, pkgs)
+	// On the first interrupt the cuts stop and the temp dirs go; a second
+	// one ends the process at once.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	results, err := coverage.Run(ctx, opts, pkgs)
+	if ctx.Err() != nil {
+		errf(errors.New("interrupted"))
+		return 130
+	}
 	if err != nil {
 		errf(err)
 		return 2

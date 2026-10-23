@@ -5,6 +5,7 @@ package cut
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -78,14 +79,17 @@ var fetching = regexp.MustCompile(`Fetching (?:\S*/)?([^/_\s]+)_([^/_\s]+)_([^/_
 // root, which it creates, and walks the result. Maintenance status is always
 // ignored so an old or devel release still cuts. A missing package for the
 // architecture is ErrNotAvailable; any other failure is an *Error, wrapping
-// ErrNoContent when a path of the slice matched nothing.
-func (r *Runner) Cut(release, root, arch, slice string) (*Result, error) {
+// ErrNoContent when a path of the slice matched nothing. When ctx is done
+// chisel is interrupted and the cut fails.
+func (r *Runner) Cut(ctx context.Context, release, root, arch, slice string) (*Result, error) {
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, err
 	}
 	args := []string{"cut", "--release", release, "--root", root, "--arch", arch,
 		"--ignore", "unmaintained", "--ignore", "unstable", slice}
-	cmd := exec.Command(r.Bin, args...)
+	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 5 * time.Second
 	if r.CacheHome != "" {
 		cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+r.CacheHome)
 	}

@@ -1,6 +1,8 @@
 package coverage
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -8,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lczyk/assert"
 
@@ -24,6 +27,7 @@ import (
 // it fails unless blob $FAKE_CACHE is in $XDG_CACHE_HOME/chisel/sha256/, then
 // writes a blob named after the cut there and appends $XDG_CACHE_HOME to
 // $FAKE_HOMES. A <arch>/<pkg>.all marker makes the fetched deb an arch: all one.
+// $FAKE_SLEEP, when set, is slept before anything else.
 const fakeChisel = `#!/bin/sh
 while [ $# -gt 1 ]; do
   case "$1" in
@@ -35,6 +39,7 @@ done
 slice="$1"
 pkg="${slice%%_*}"
 [ -n "$FAKE_LOG" ] && printf '%s %s\n' "$arch" "$slice" >> "$FAKE_LOG"
+[ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
 if [ -n "$FAKE_LOCKS" ]; then
   mkdir "$FAKE_LOCKS/$arch" 2>/dev/null || { echo "overlapping cut on $arch" >&2; exit 1; }
   sleep 0.05
@@ -148,6 +153,7 @@ func setup(t *testing.T) *fixture {
 	t.Setenv("FAKE_TREES", f.trees)
 	t.Setenv("FAKE_LOG", f.log)
 	t.Setenv("FAKE_LOCKS", "")
+	t.Setenv("FAKE_SLEEP", "")
 	t.Setenv("FAKE_FAIL", "")
 	t.Setenv("FAKE_NOCONTENT", "")
 	t.Setenv("FAKE_CACHE", "")
@@ -167,7 +173,7 @@ func TestRunCoverage(t *testing.T) {
 	f := setup(t)
 	// The third ignore matches nothing, which chisel reports as a failed cut.
 	t.Setenv("FAKE_NOCONTENT", "bash_cov-ignore-2")
-	res, err := Run(Options{
+	res, err := Run(context.Background(), Options{
 		Release: f.release,
 		Arches:  []string{"amd64", "i386", "arm64"},
 		Ignores: []string{"/usr/share/man/**", "/usr/share/doc/**", "/nope/**"},
@@ -238,17 +244,17 @@ func TestRunCoverage(t *testing.T) {
 
 func TestRunOnlySlices(t *testing.T) {
 	f := setup(t)
-	res, err := Run(Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"bins"}, Runner: f.runner}, []string{"bash"})
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"bins"}, Runner: f.runner}, []string{"bash"})
 	assert.NoError(t, err)
 	assert.EqualArrays(t, res[0].Slices, []string{"bins"})
 	assert.EqualArrays(t, f.cuts(t), []string{"amd64 bash_cov-all", "amd64 bash_bins"})
 	assert.Len(t, res[0].Arches[0].Uncovered, 19-4)
 
-	_, err = Run(Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"bash_nope"}, Runner: f.runner}, []string{"bash"})
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"bash_nope"}, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, `bash has no slice "nope"`)
-	_, err = Run(Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"nope"}, Runner: f.runner}, []string{"bash"})
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"nope"}, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, "no package being checked has a slice named nope")
-	_, err = Run(Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"zsh_bins"}, Runner: f.runner}, []string{"bash"})
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"zsh_bins"}, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, "package zsh is not being checked")
 }
 
@@ -256,13 +262,13 @@ func TestRunCutFailureIsPerArch(t *testing.T) {
 	f := setup(t)
 	// A real slice's path matching nothing is a failure, not an empty set.
 	t.Setenv("FAKE_NOCONTENT", "bash_config")
-	res, err := Run(Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, []string{"bash"})
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, []string{"bash"})
 	assert.NoError(t, err)
 	assert.Error(t, res[0].Arches[0].Err, "no content at /nope/**")
 
 	t.Setenv("FAKE_NOCONTENT", "")
 	t.Setenv("FAKE_FAIL", "bash_config")
-	res, err = Run(Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Runner: f.runner}, []string{"bash"})
+	res, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Runner: f.runner}, []string{"bash"})
 	assert.NoError(t, err)
 	for _, a := range res[0].Arches {
 		assert.Error(t, a.Err, "bash_config: exit status 1\n  boom")
@@ -273,13 +279,13 @@ func TestRunCutFailureIsPerArch(t *testing.T) {
 
 func TestRunErrorsUpFront(t *testing.T) {
 	f := setup(t)
-	_, err := Run(Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, nil)
+	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, nil)
 	assert.Error(t, err, "no packages")
-	_, err = Run(Options{Release: f.release, Runner: f.runner}, []string{"bash"})
+	_, err = Run(context.Background(), Options{Release: f.release, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, "no architectures")
-	_, err = Run(Options{Release: t.TempDir(), Arches: []string{"amd64"}, Runner: f.runner}, []string{"bash"})
+	_, err = Run(context.Background(), Options{Release: t.TempDir(), Arches: []string{"amd64"}, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, "not a chisel release")
-	_, err = Run(Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, []string{"zsh"})
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, []string{"zsh"})
 	assert.Error(t, err, "zsh.yaml")
 }
 
@@ -292,7 +298,7 @@ func TestRunLanesNeverOverlapAndLeadGoesFirst(t *testing.T) {
 		assert.NoError(t, os.MkdirAll(filepath.Join(f.trees, arch, "dash_cov-all/usr/bin"), 0755))
 	}
 	arches := []string{"amd64", "arm64", "ppc64el", "s390x", "riscv64"}
-	res, err := Run(Options{Release: f.release, Arches: arches, Runner: f.runner}, []string{"bash", "dash", "bash"})
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: arches, Runner: f.runner}, []string{"bash", "dash", "bash"})
 	assert.NoError(t, err)
 	assert.Len(t, res, 2)
 	for _, p := range res {
@@ -319,7 +325,7 @@ func TestRunJobsUseCacheViews(t *testing.T) {
 	touch(t, filepath.Join(shared, "sha256", "abc123"))
 	t.Setenv("FAKE_CACHE", "abc123")
 	var log strings.Builder
-	res, err := Run(Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Jobs: 2, Cache: shared, Runner: f.runner, Log: &log}, []string{"bash", "dash"})
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Jobs: 2, Cache: shared, Runner: f.runner, Log: &log}, []string{"bash", "dash"})
 	assert.NoError(t, err)
 	assert.Equal(t, log.String(), "")
 	for _, p := range res {
@@ -359,7 +365,7 @@ func TestRunArchAllPackagesAreProbed(t *testing.T) {
 		assert.NoError(t, os.WriteFile(filepath.Join(f.trees, arch, "dash.version"), []byte("0.5"), 0644))
 		touch(t, filepath.Join(f.trees, arch, "dash.all"))
 	}
-	res, err := Run(Options{Release: f.release, Arches: []string{"amd64", "arm64", "riscv64"}, Runner: f.runner}, []string{"dash", "bash"})
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64", "riscv64"}, Runner: f.runner}, []string{"dash", "bash"})
 	assert.NoError(t, err)
 	cuts := f.cuts(t)
 	// dash is cut in full on the lead arch only, probed on the rest; bash is
@@ -379,12 +385,34 @@ func TestRunArchAllPackagesAreProbed(t *testing.T) {
 	assert.That(t, !dash.Arches[2].Available)
 }
 
+func TestRunStopsWhenCancelled(t *testing.T) {
+	f := setup(t)
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	touch(t, filepath.Join(shared, "sha256", "abc123"))
+	t.Setenv("FAKE_CACHE", "abc123")
+	t.Setenv("FAKE_SLEEP", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	var log strings.Builder
+	_, err := Run(ctx, Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Jobs: 2, Cache: shared, Keep: true, Runner: f.runner, Log: &log}, []string{"bash", "dash"})
+	assert.That(t, errors.Is(err, context.DeadlineExceeded))
+	assert.That(t, time.Since(start) < 4*time.Second)
+	// Nothing after the cuts in flight ran, and the views are gone even
+	// though --keep holds on to the work dir.
+	assert.That(t, len(f.cuts(t)) <= 2)
+	views, err := os.ReadDir(filepath.Join(filepath.Dir(shared), "chisel-slice-coverage"))
+	assert.NoError(t, err)
+	assert.Len(t, views, 0)
+	assert.That(t, strings.Contains(log.String(), "rootfs dirs: "))
+}
+
 func TestRunJobsCapsConcurrentCuts(t *testing.T) {
 	f := setup(t)
 	locks := t.TempDir()
 	t.Setenv("FAKE_LOCKS", locks)
 	// One slot: cuts on one arch never overlap even with many packages.
-	res, err := Run(Options{Release: f.release, Arches: []string{"amd64"}, Jobs: 1, Runner: f.runner}, []string{"bash", "dash"})
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Jobs: 1, Runner: f.runner}, []string{"bash", "dash"})
 	assert.NoError(t, err)
 	for _, p := range res {
 		assert.Nil(t, p.Arches[0].Err)
@@ -400,7 +428,7 @@ func TestRunVerbose(t *testing.T) {
 	t.Setenv("FAKE_NOCONTENT", "bash_cov-ignore-0")
 	t.Setenv("FAKE_FAIL", "bash_copyright")
 	var out strings.Builder
-	_, err := Run(Options{Release: f.release, Arches: []string{"amd64", "riscv64"}, Ignores: []string{"/nope/**"}, Runner: f.runner, Verbose: &out}, []string{"bash"})
+	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "riscv64"}, Ignores: []string{"/nope/**"}, Runner: f.runner, Verbose: &out}, []string{"bash"})
 	assert.NoError(t, err)
 	var lines []string
 	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
@@ -422,7 +450,7 @@ var took = regexp.MustCompile(` \d+\.\ds$`)
 func TestRunKeep(t *testing.T) {
 	f := setup(t)
 	var log strings.Builder
-	_, err := Run(Options{Release: f.release, Arches: []string{"amd64"}, Keep: true, Runner: f.runner, Log: &log}, []string{"bash"})
+	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Keep: true, Runner: f.runner, Log: &log}, []string{"bash"})
 	assert.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(log.String()), "\n")
 	assert.Len(t, lines, 2)

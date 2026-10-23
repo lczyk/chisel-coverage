@@ -1,6 +1,7 @@
 package coverage
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -91,7 +92,7 @@ slices:
 `), 0644))
 	assert.NoError(t, os.WriteFile(filepath.Join(release, "slices", "ghost.yaml"), []byte("package: ghost\nslices:\n  all:\n    contents:\n      /x:\n"), 0644))
 
-	res, err := Run(Options{
+	res, err := Run(context.Background(), Options{
 		Release: release,
 		Arches:  []string{arch},
 		Ignores: []string{"/usr/share/doc/**", "/usr/share/man/**"},
