@@ -15,7 +15,7 @@ import (
 	"github.com/lczyk/chisel-proxy/pkg/apt"
 	"github.com/lczyk/chisel-proxy/pkg/deb"
 
-	"github.com/lczyk/chisel-slice-coverage/internal/cut"
+	"github.com/lczyk/chisel-coverage/internal/cut"
 )
 
 // TestRealChisel pins what the design assumes about chisel: that the whole-deb

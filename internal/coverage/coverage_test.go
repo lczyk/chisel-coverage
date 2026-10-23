@@ -14,8 +14,8 @@ import (
 
 	"github.com/lczyk/assert"
 
-	"github.com/lczyk/chisel-slice-coverage/internal/cache"
-	"github.com/lczyk/chisel-slice-coverage/internal/cut"
+	"github.com/lczyk/chisel-coverage/internal/cache"
+	"github.com/lczyk/chisel-coverage/internal/cut"
 )
 
 // fakeChisel fills --root from $FAKE_TREES/<arch>/<slice>/. A package with no
@@ -342,7 +342,7 @@ func TestRunJobsUseCacheViews(t *testing.T) {
 	assert.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(homes)), "\n")
 	assert.Len(t, lines, 2*(4+2))
-	base := filepath.Join(filepath.Dir(shared), "chisel-slice-coverage")
+	base := filepath.Join(filepath.Dir(shared), "chisel-coverage")
 	inView := 0
 	for _, l := range lines {
 		h := strings.Fields(l)[0]
@@ -418,7 +418,7 @@ func TestRunStopsWhenCancelled(t *testing.T) {
 	// Nothing after the cuts in flight ran, and the views are gone even
 	// though --keep holds on to the work dir.
 	assert.That(t, len(f.cuts(t)) <= 2)
-	views, err := os.ReadDir(filepath.Join(filepath.Dir(shared), "chisel-slice-coverage"))
+	views, err := os.ReadDir(filepath.Join(filepath.Dir(shared), "chisel-coverage"))
 	assert.NoError(t, err)
 	assert.Len(t, views, 0)
 	assert.That(t, strings.Contains(log.String(), "rootfs dirs: "))

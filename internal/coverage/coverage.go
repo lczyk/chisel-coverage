@@ -20,9 +20,9 @@ import (
 
 	temprelease "github.com/lczyk/chisel-proxy/pkg/temp-release"
 
-	"github.com/lczyk/chisel-slice-coverage/internal/cache"
-	"github.com/lczyk/chisel-slice-coverage/internal/cut"
-	"github.com/lczyk/chisel-slice-coverage/internal/sdf"
+	"github.com/lczyk/chisel-coverage/internal/cache"
+	"github.com/lczyk/chisel-coverage/internal/cut"
+	"github.com/lczyk/chisel-coverage/internal/sdf"
 )
 
 // AllArches lists every architecture ubuntu builds for, in --arch all order.
@@ -150,7 +150,7 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		r.results = append(r.results, Package{Name: pkg, Slices: p.slices, Arches: make([]Arch, len(opts.Arches))})
 		r.cells = append(r.cells, make([]cell, len(opts.Arches)))
 	}
-	r.work, err = os.MkdirTemp("", "chisel-slice-coverage-*")
+	r.work, err = os.MkdirTemp("", "chisel-coverage-*")
 	if err != nil {
 		return nil, err
 	}

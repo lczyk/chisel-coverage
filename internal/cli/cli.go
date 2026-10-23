@@ -15,11 +15,11 @@ import (
 	"github.com/lczyk/chisel-proxy/pkg/deb"
 	ver "github.com/lczyk/version/go"
 
-	chiselslicecoverage "github.com/lczyk/chisel-slice-coverage"
-	"github.com/lczyk/chisel-slice-coverage/internal/cache"
-	"github.com/lczyk/chisel-slice-coverage/internal/coverage"
-	"github.com/lczyk/chisel-slice-coverage/internal/cut"
-	"github.com/lczyk/chisel-slice-coverage/internal/release"
+	chiselcoverage "github.com/lczyk/chisel-coverage"
+	"github.com/lczyk/chisel-coverage/internal/cache"
+	"github.com/lczyk/chisel-coverage/internal/coverage"
+	"github.com/lczyk/chisel-coverage/internal/cut"
+	"github.com/lczyk/chisel-coverage/internal/release"
 )
 
 // Main runs the CLI and returns a process exit code: 0 ran fine, 1 uncovered
@@ -46,7 +46,7 @@ func Main(args []string) int {
 		return 0
 	}
 	if f.Version {
-		fmt.Println(ver.Read(fileVersion(chiselslicecoverage.VersionFile)))
+		fmt.Println(ver.Read(fileVersion(chiselcoverage.VersionFile)))
 		return 0
 	}
 	if len(pkgs) == 0 {
@@ -148,7 +148,7 @@ type flags struct {
 }
 
 func newParser(f *flags) *goflags.Parser {
-	p := goflags.NewNamedParser("chisel-slice-coverage", goflags.HelpFlag|goflags.PassDoubleDash)
+	p := goflags.NewNamedParser("chisel-coverage", goflags.HelpFlag|goflags.PassDoubleDash)
 	p.Usage = "[flags] <package>..."
 	p.LongDescription = strings.TrimSpace(`
 for each package, every slice is cut on its own against a throwaway copy of
@@ -245,5 +245,5 @@ func fileVersion(content string) string {
 }
 
 func errf(err error) {
-	fmt.Fprintf(os.Stderr, "chisel-slice-coverage: %v\n", err)
+	fmt.Fprintf(os.Stderr, "chisel-coverage: %v\n", err)
 }

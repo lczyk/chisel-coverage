@@ -38,7 +38,7 @@ func Dir() string {
 // releases live there. It is "" when Dir is.
 func Base() string {
 	if d := Dir(); d != "" {
-		return filepath.Join(filepath.Dir(d), "chisel-slice-coverage")
+		return filepath.Join(filepath.Dir(d), "chisel-coverage")
 	}
 	return ""
 }
@@ -60,11 +60,11 @@ const linkers = 4
 // a temp file or a lock.
 var blob = regexp.MustCompile(`^[0-9a-f]+$`)
 
-// New makes a view under <parent of shared>/chisel-slice-coverage, so on the
+// New makes a view under <parent of shared>/chisel-coverage, so on the
 // same filesystem, seeded with every blob of shared. Views a crashed run left
 // behind for more than a day are removed on the way.
 func New(shared string) (*View, error) {
-	base := filepath.Join(filepath.Dir(shared), "chisel-slice-coverage")
+	base := filepath.Join(filepath.Dir(shared), "chisel-coverage")
 	// Not Base(): shared may be a test's own dir rather than chisel's.
 	if err := os.MkdirAll(base, 0755); err != nil {
 		return nil, err

@@ -225,7 +225,7 @@ func Synthesise(d *Definition, only []string, ignores []string) (file []byte, cu
 			continue
 		}
 		if s.Name == AllSlice || s.Name == ProbeSlice || IsIgnore(s.Name) {
-			return nil, nil, fmt.Errorf("%s: slice name %q is reserved by chisel-slice-coverage", d.Package, s.Name)
+			return nil, nil, fmt.Errorf("%s: slice name %q is reserved by chisel-coverage", d.Package, s.Name)
 		}
 		if len(s.Entries) > 0 {
 			addSlice(s.Name, s.Entries)

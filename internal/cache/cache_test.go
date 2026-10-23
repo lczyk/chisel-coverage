@@ -89,7 +89,7 @@ func TestViewOfEmptyCache(t *testing.T) {
 
 func TestNewSweepsStaleViews(t *testing.T) {
 	shared := filepath.Join(t.TempDir(), "chisel")
-	base := filepath.Join(filepath.Dir(shared), "chisel-slice-coverage")
+	base := filepath.Join(filepath.Dir(shared), "chisel-coverage")
 	stale := filepath.Join(base, "view-stale")
 	fresh := filepath.Join(base, "view-fresh")
 	other := filepath.Join(base, "other")

@@ -1,4 +1,4 @@
-# chisel-slice-coverage
+# chisel-coverage
 
 development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture; `--json` also lists what each slice does take.
 
@@ -10,7 +10,7 @@ when writing or reviewing a slice definition you want to know what you left out,
 
 ```shell
 cd ~/git/chisel-releases
-chisel-slice-coverage --ignore '/usr/share/man/**,/usr/share/doc/**' bash
+chisel-coverage --ignore '/usr/share/man/**,/usr/share/doc/**' bash
 ```
 
 ```
@@ -30,7 +30,7 @@ total 44 covered 16 ignored 19 uncovered 9
 every entry of the deb counts, directories included; a directory is covered once anything under it is. `--arch all` checks every architecture, and architectures with the same version are folded on what their debs ship (after folding the multiarch triplet into `<arch>-linux-<gnu>`): one block for the paths on all of them, then one per set of architectures with paths of their own; `--no-group` gives one block per architecture with its real paths instead. several packages can be given at once. cuts run in parallel, one per cpu by default (`-j`), each chisel with a private view of the cache so they cannot trip over each other; `-j 1` runs them one after another. the `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`.
 
 ```
-chisel-slice-coverage [flags] <package>...
+chisel-coverage [flags] <package>...
       --release=<dir|name>     chisel-releases checkout, or a release name
                                like ubuntu-24.04 fetched from github and
                                cached (default: .)
@@ -69,7 +69,7 @@ so archive selection, suites, priorities, pro archives, signatures, `arch:` list
 ## build
 
 ```shell
-make build      # ./bin/chisel-slice-coverage
+make build      # ./bin/chisel-coverage
 make test       # unit tests; the real-chisel ones skip without `chisel`
 make e2e        # real chisel against the real archive and a chisel-releases clone (needs network)
 ```

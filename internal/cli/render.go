@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/lczyk/chisel-slice-coverage/internal/coverage"
+	"github.com/lczyk/chisel-coverage/internal/coverage"
 )
 
 // style colours the text report. The zero value colours nothing.

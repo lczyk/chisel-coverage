@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/lczyk/chisel-slice-coverage/internal/cli"
+	"github.com/lczyk/chisel-coverage/internal/cli"
 )
 
 func main() {

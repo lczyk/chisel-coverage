@@ -2,7 +2,7 @@
 
 // Package e2e runs the tool for real: a real chisel against the real archive
 // and a real chisel-releases clone. Gated behind the e2e build tag and
-// CHISEL_SLICE_COVERAGE_E2E because it needs the chisel binary and network
+// CHISEL_COVERAGE_E2E because it needs the chisel binary and network
 // access.
 package e2e
 
@@ -14,15 +14,15 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lczyk/chisel-slice-coverage/internal/cli"
+	"github.com/lczyk/chisel-coverage/internal/cli"
 )
 
 const releaseBranch = "ubuntu-24.04"
 
 func requireE2E(t *testing.T) {
 	t.Helper()
-	if os.Getenv("CHISEL_SLICE_COVERAGE_E2E") != "1" {
-		t.Skip("set CHISEL_SLICE_COVERAGE_E2E=1 to run (needs chisel + network)")
+	if os.Getenv("CHISEL_COVERAGE_E2E") != "1" {
+		t.Skip("set CHISEL_COVERAGE_E2E=1 to run (needs chisel + network)")
 	}
 	chisel := os.Getenv("CHISEL")
 	if chisel == "" {
@@ -104,7 +104,7 @@ func TestBashCoverage(t *testing.T) {
 		return cli.Main([]string{"--release", release, "--json", "--ignore", "/usr/share/man/**", "bash"})
 	})
 	if code != 0 {
-		t.Fatalf("chisel-slice-coverage exited %d:\n%s", code, out)
+		t.Fatalf("chisel-coverage exited %d:\n%s", code, out)
 	}
 	var rep report
 	if err := json.Unmarshal([]byte(out), &rep); err != nil {

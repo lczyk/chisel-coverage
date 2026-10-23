@@ -11,7 +11,7 @@ import (
 
 	"github.com/lczyk/assert"
 
-	"github.com/lczyk/chisel-slice-coverage/internal/coverage"
+	"github.com/lczyk/chisel-coverage/internal/coverage"
 )
 
 func TestParseArgs(t *testing.T) {

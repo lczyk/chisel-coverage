@@ -41,7 +41,7 @@ func Resolve(ctx context.Context, arg, cacheDir string, log func(format string, 
 		return "", fmt.Errorf("%s is not a directory or a release name like ubuntu-24.04", arg)
 	}
 	if cacheDir == "" {
-		cacheDir = filepath.Join(os.TempDir(), "chisel-slice-coverage")
+		cacheDir = filepath.Join(os.TempDir(), "chisel-coverage")
 	}
 	if log == nil {
 		log = func(string, ...any) {}

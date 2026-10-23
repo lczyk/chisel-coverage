@@ -1,4 +1,4 @@
-module github.com/lczyk/chisel-slice-coverage
+module github.com/lczyk/chisel-coverage
 
 go 1.24.0
 

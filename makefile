@@ -14,16 +14,16 @@ help:  ## Show this help
 ##@ build
 
 .PHONY: build
-build: ./bin/chisel-slice-coverage  ## Build the binary into ./bin
+build: ./bin/chisel-coverage  ## Build the binary into ./bin
 
-./bin/chisel-slice-coverage: $(SRCS) makefile go.mod go.sum
+./bin/chisel-coverage: $(SRCS) makefile go.mod go.sum
 	mkdir -p ./bin
-	go build -o ./bin/chisel-slice-coverage ./cmd/chisel-slice-coverage
+	go build -o ./bin/chisel-coverage ./cmd/chisel-coverage
 
 .PHONY: install
-install: ./bin/chisel-slice-coverage  ## Symlink the binary into ~/.local/bin
+install: ./bin/chisel-coverage  ## Symlink the binary into ~/.local/bin
 	mkdir -p $(HOME)/.local/bin
-	ln -sf "$(PWD)/bin/chisel-slice-coverage" "$(HOME)/.local/bin/chisel-slice-coverage"
+	ln -sf "$(PWD)/bin/chisel-coverage" "$(HOME)/.local/bin/chisel-coverage"
 
 ##@ checks
 
@@ -37,7 +37,7 @@ test:  ## Run the unit tests with the race detector (real chisel ones skip witho
 
 .PHONY: e2e
 e2e:  ## Run the end-to-end test (needs `chisel` + network; override CHISEL=..)
-	CHISEL_SLICE_COVERAGE_E2E=1 go test -tags e2e -count=1 -v ./e2e/...
+	CHISEL_COVERAGE_E2E=1 go test -tags e2e -count=1 -v ./e2e/...
 
 .PHONY: lint
 lint:  ## go vet + staticcheck + deadcode + gofmt check (no writes)
@@ -64,5 +64,5 @@ verify: lint test  ## Pre-commit gate: lint + test
 
 .PHONY: clean
 clean:  ## Remove build artefacts
-	rm -f ./bin/chisel-slice-coverage
+	rm -f ./bin/chisel-coverage
 	rm -f ./cover.out ./cover.html

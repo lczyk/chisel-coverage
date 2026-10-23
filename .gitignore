@@ -1,6 +1,6 @@
 # build output
 bin/
-/chisel-slice-coverage
+/chisel-coverage
 
 # coverage
 cover.out
