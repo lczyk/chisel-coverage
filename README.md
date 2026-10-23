@@ -15,7 +15,7 @@ chisel-slice-coverage --ignore '/usr/share/man/**,/usr/share/doc/**' bash
 
 ```
 bash 5.2.21-2ubuntu4 [amd64]
-total 44  covered 16  ignored 19  uncovered 9
+total 44 covered 16 ignored 19 uncovered 9
 /usr/share/debianutils/
 /usr/share/debianutils/shells.d/
 /usr/share/debianutils/shells.d/bash
