@@ -433,8 +433,12 @@ func TestRunVerbose(t *testing.T) {
 	var lines []string
 	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
 		assert.That(t, stamped.MatchString(l), l)
-		lines = append(lines, took.ReplaceAllString(stamped.ReplaceAllString(l, ""), ""))
+		lines = append(lines, stamped.ReplaceAllString(l, ""))
 	}
+	// Only the summary carries a time, the run's total.
+	last := len(lines) - 1
+	assert.That(t, took.MatchString(lines[last]), lines[last])
+	lines[last] = took.ReplaceAllString(lines[last], "")
 	assert.EqualArrays(t, lines, []string{
 		"amd64 bash_cov-all 19",
 		"amd64 bash_config 3",

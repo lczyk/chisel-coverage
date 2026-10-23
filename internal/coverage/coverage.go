@@ -365,7 +365,7 @@ func (r *run) worker(isolate bool) *worker {
 
 // prepare gives an isolated worker its view before its first unit, on arch
 // for pkg: one an earlier worker left when there is one, else a new one,
-// logged like a cut as "<arch> <pkg>_cov-cache-view <blobs> <seconds>s".
+// logged like a cut as "<arch> <pkg>_cov-cache-view <blobs>".
 // When no view can be made the worker shares chisel's cache as is.
 func (w *worker) prepare(arch, pkg string) {
 	if !w.isolate {
@@ -383,14 +383,13 @@ func (w *worker) prepare(arch, pkg string) {
 		// seeding views one at a time costs nothing overall and gets the
 		// first one out sooner.
 		r.seeding.Lock()
-		start := time.Now()
 		view, err := cache.New(r.opts.Cache)
 		r.seeding.Unlock()
 		if err != nil {
 			r.logf("%s %s_cov-cache-view error: %v; sharing chisel's cache instead", arch, pkg, err)
 			return
 		}
-		r.verbosef("%s %s_cov-cache-view %d %.1fs", arch, pkg, view.Blobs(), time.Since(start).Seconds())
+		r.verbosef("%s %s_cov-cache-view %d", arch, pkg, view.Blobs())
 		w.view = view
 	}
 	w.runner.CacheHome = w.view.Home
@@ -425,9 +424,8 @@ func (r *run) cutPackage(w *worker, p *prepared, arch string) Arch {
 	sets := map[string][]string{}
 	for _, name := range p.cuts {
 		root := filepath.Join(r.work, p.def.Package, arch, name)
-		start := time.Now()
 		res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
-		r.cutf(arch, p.def.Package+"_"+name, res, err, time.Since(start))
+		r.cutf(arch, p.def.Package+"_"+name, res, err)
 		r.discard(root)
 		if errors.Is(err, cut.ErrNotAvailable) && name == sdf.AllSlice {
 			return a
@@ -503,9 +501,8 @@ func (r *run) removeViews() {
 func (r *run) probe(w *worker, u unit) Arch {
 	p, arch := r.prepared[u.pi], r.opts.Arches[u.ai]
 	root := filepath.Join(r.work, p.def.Package, arch, sdf.ProbeSlice)
-	start := time.Now()
 	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+sdf.ProbeSlice)
-	r.cutf(arch, p.def.Package+"_"+sdf.ProbeSlice, res, err, time.Since(start))
+	r.cutf(arch, p.def.Package+"_"+sdf.ProbeSlice, res, err)
 	r.discard(root)
 	if errors.Is(err, cut.ErrNotAvailable) {
 		return Arch{Arch: arch}
@@ -549,9 +546,9 @@ func (r *run) cleanup() {
 }
 
 // cutf counts one finished cut and reports it on the Verbose writer as
-// "<arch> <slice> <paths> <seconds>s"; a package missing for the
-// architecture is "n/a", a glob matching nothing "0", a failure "error".
-func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Duration) {
+// "<arch> <slice> <paths>"; a package missing for the architecture is
+// "n/a", a glob matching nothing "0", a failure "error".
+func (r *run) cutf(arch, slice string, res *cut.Result, err error) {
 	r.mu.Lock()
 	r.cuts++
 	if res != nil {
@@ -573,7 +570,7 @@ func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Dur
 	default:
 		what = fmt.Sprintf("%d", len(res.Paths))
 	}
-	stampf(r.opts.Verbose, "%s %s %s %.1fs", arch, slice, what, took.Seconds())
+	stampf(r.opts.Verbose, "%s %s %s", arch, slice, what)
 }
 
 // verbosef writes a line on the Verbose writer.
