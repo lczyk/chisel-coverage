@@ -71,7 +71,11 @@ func Main(args []string) int {
 		<-ctx.Done()
 		stop()
 	}()
-	dir, err := release.Resolve(ctx, f.Release, cache.Base(), func(format string, args ...any) {
+	runner := &cut.Runner{Bin: cut.Binary()}
+	if len(f.Verbose) >= 2 {
+		runner.Verbose = os.Stderr
+	}
+	dir, err := release.Resolve(ctx, f.Release, cache.Dir(), runner.Fetch, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "%s %s\n", cut.Stamp(), fmt.Sprintf(format, args...))
 	})
 	if err != nil {
@@ -79,7 +83,6 @@ func Main(args []string) int {
 		return 2
 	}
 
-	runner := &cut.Runner{Bin: cut.Binary()}
 	opts := coverage.Options{
 		Release: dir,
 		Arches:  arches,
@@ -93,9 +96,6 @@ func Main(args []string) int {
 	}
 	if len(f.Verbose) >= 1 {
 		opts.Verbose = os.Stderr
-	}
-	if len(f.Verbose) >= 2 {
-		runner.Verbose = os.Stderr
 	}
 	results, err := coverage.Run(ctx, opts, pkgs)
 	if ctx.Err() != nil {
@@ -132,7 +132,7 @@ func Main(args []string) int {
 
 // flags is the command line; go-flags fills it and renders the help from it.
 type flags struct {
-	Release       string   `long:"release" value-name:"<dir|name>" default:"." description:"chisel-releases checkout, or a release name like ubuntu-24.04 fetched from github and cached"`
+	Release       string   `long:"release" value-name:"<dir|name>" default:"." description:"chisel-releases checkout, or a release name like ubuntu-24.04 fetched by chisel into its cache"`
 	Arches        []string `long:"arch" value-name:"<a>[,<a>...]" description:"architectures to check; \"all\" for every one (default: host)"`
 	Slices        []string `long:"slice" value-name:"<s>[,<s>...]" description:"only these slices, bare or <package>_<slice> (default: all)"`
 	Ignores       []string `long:"ignore" value-name:"<glob>[,...]" description:"leave matching paths out of the uncovered set (chisel glob syntax)"`

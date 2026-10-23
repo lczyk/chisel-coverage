@@ -1,164 +1,99 @@
 package release
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/lczyk/assert"
 )
 
-// tarball is a github branch archive: every entry under one top-level dir.
-func tarball(t *testing.T, top string, files map[string]string) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	assert.NoError(t, tw.WriteHeader(&tar.Header{Name: top + "/", Typeflag: tar.TypeDir, Mode: 0755}))
-	for name, body := range files {
-		assert.NoError(t, tw.WriteHeader(&tar.Header{Name: top + "/" + name, Typeflag: tar.TypeReg, Mode: 0644, Size: int64(len(body))}))
-		_, err := tw.Write([]byte(body))
-		assert.NoError(t, err)
+// chisel stands in for chisel fetching a release: it drops chisel.yaml where
+// chisel would, or fails, and counts the calls.
+type chisel struct {
+	cache string
+	fail  error
+	calls int
+	names []string
+}
+
+func (c *chisel) fetch(_ context.Context, name string) error {
+	c.calls++
+	c.names = append(c.names, name)
+	if c.fail != nil {
+		return c.fail
 	}
-	assert.NoError(t, tw.Close())
-	assert.NoError(t, gz.Close())
-	return buf.Bytes()
-}
-
-// github serves one release tarball under an etag and counts requests.
-type github struct {
-	t        *testing.T
-	body     []byte
-	etag     string
-	requests int
-}
-
-func (g *github) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	g.requests++
-	if !strings.HasSuffix(r.URL.Path, "/ubuntu-24.04") {
-		w.WriteHeader(http.StatusNotFound)
-		return
+	dir := filepath.Join(c.cache, "releases", name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
 	}
-	if r.Header.Get("If-None-Match") == g.etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	w.Header().Set("ETag", g.etag)
-	_, _ = w.Write(g.body)
-}
-
-func serve(t *testing.T, g *github) {
-	t.Helper()
-	srv := httptest.NewServer(g)
-	t.Cleanup(srv.Close)
-	old := baseURL
-	baseURL = srv.URL + "/"
-	t.Cleanup(func() { baseURL = old })
-}
-
-func read(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	assert.NoError(t, err)
-	return string(b)
+	return os.WriteFile(filepath.Join(dir, "chisel.yaml"), []byte("format: v1\n"), 0644)
 }
 
 func TestResolveDirectoryAsIs(t *testing.T) {
+	c := &chisel{cache: t.TempDir()}
 	dir := t.TempDir()
-	got, err := Resolve(context.Background(), dir, t.TempDir(), nil)
+	got, err := Resolve(context.Background(), dir, c.cache, c.fetch, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, got, dir)
+	assert.Equal(t, c.calls, 0)
 }
 
 func TestResolveRejectsOther(t *testing.T) {
-	_, err := Resolve(context.Background(), filepath.Join(t.TempDir(), "missing"), t.TempDir(), nil)
-	assert.Error(t, err, "not a directory or a release name")
-	_, err = Resolve(context.Background(), "Ubuntu-24.04", t.TempDir(), nil)
-	assert.Error(t, err, "not a directory or a release name")
+	c := &chisel{cache: t.TempDir()}
+	for _, arg := range []string{filepath.Join(t.TempDir(), "missing"), "Ubuntu-24.04", "ubuntu", "u-24.04", "ubuntu-24.04/"} {
+		_, err := Resolve(context.Background(), arg, c.cache, c.fetch, nil)
+		assert.Error(t, err, "not a directory or a release name", arg)
+	}
+	assert.Equal(t, c.calls, 0)
+	_, err := Resolve(context.Background(), "ubuntu-24.04", "", c.fetch, nil)
+	assert.Error(t, err, "cannot find chisel's cache")
 }
 
-func TestResolveFetchesThenReusesThenRefreshes(t *testing.T) {
-	g := &github{t: t, etag: "v1", body: tarball(t, "chisel-releases-ubuntu-24.04", map[string]string{"chisel.yaml": "format: v1\n", "slices/bash.yaml": "package: bash\n"})}
-	serve(t, g)
-	cache := t.TempDir()
+func TestResolveHasChiselFetch(t *testing.T) {
+	c := &chisel{cache: t.TempDir()}
 	var notices []string
 	logf := func(format string, args ...any) { notices = append(notices, fmt.Sprintf(format, args...)) }
-
-	dir, err := Resolve(context.Background(), "ubuntu-24.04", cache, logf)
-	assert.NoError(t, err)
-	assert.Equal(t, dir, filepath.Join(cache, "releases", "ubuntu-24.04"))
-	assert.Equal(t, read(t, filepath.Join(dir, "chisel.yaml")), "format: v1\n")
-	assert.Equal(t, read(t, filepath.Join(dir, "slices", "bash.yaml")), "package: bash\n")
-	assert.Equal(t, read(t, filepath.Join(dir, ".etag")), "v1")
-	assert.EqualArrays(t, notices, []string{"release ubuntu-24.04: fetching from github"})
-
-	// Up to date: github answers 304 and the directory is left alone.
-	marker := filepath.Join(dir, "marker")
-	assert.NoError(t, os.WriteFile(marker, nil, 0644))
-	_, err = Resolve(context.Background(), "ubuntu-24.04", cache, logf)
-	assert.NoError(t, err)
-	assert.Equal(t, g.requests, 2)
-	_, err = os.Stat(marker)
-	assert.NoError(t, err)
-
-	// A new branch head replaces the directory wholesale.
-	g.etag = "v2"
-	g.body = tarball(t, "chisel-releases-ubuntu-24.04", map[string]string{"chisel.yaml": "format: v2\n"})
-	_, err = Resolve(context.Background(), "ubuntu-24.04", cache, logf)
-	assert.NoError(t, err)
-	assert.Equal(t, read(t, filepath.Join(dir, "chisel.yaml")), "format: v2\n")
-	_, err = os.Stat(marker)
-	assert.Error(t, err, "no such file")
-	_, err = os.Stat(filepath.Join(dir, "slices"))
-	assert.Error(t, err, "no such file")
+	for _, name := range []string{"ubuntu-24.04", "ubuntu-26.04", "ubuntu-devel-26.10"} {
+		got, err := Resolve(context.Background(), name, c.cache, c.fetch, logf)
+		assert.NoError(t, err)
+		assert.Equal(t, got, filepath.Join(c.cache, "releases", name))
+	}
+	assert.EqualArrays(t, c.names, []string{"ubuntu-24.04", "ubuntu-26.04", "ubuntu-devel-26.10"})
+	assert.Len(t, notices, 0)
 }
 
-func TestResolveUnknownRelease(t *testing.T) {
-	serve(t, &github{t: t, etag: "v1", body: tarball(t, "x", nil)})
-	_, err := Resolve(context.Background(), "ubuntu-99.99", t.TempDir(), nil)
-	assert.Error(t, err, "no such release ubuntu-99.99")
-}
-
-func TestResolveOfflineUsesCache(t *testing.T) {
-	g := &github{t: t, etag: "v1", body: tarball(t, "top", map[string]string{"chisel.yaml": "format: v1\n"})}
-	srv := httptest.NewServer(g)
-	old := baseURL
-	baseURL = srv.URL + "/"
-	t.Cleanup(func() { baseURL = old })
-	cache := t.TempDir()
-	dir, err := Resolve(context.Background(), "ubuntu-24.04", cache, nil)
+func TestResolveOfflineUsesChiselsCopy(t *testing.T) {
+	c := &chisel{cache: t.TempDir()}
+	dir, err := Resolve(context.Background(), "ubuntu-24.04", c.cache, c.fetch, nil)
 	assert.NoError(t, err)
-	srv.Close()
 
+	c.fail = errors.New("chisel find: exit status 1\n  error: cannot talk to release repository")
 	var notices []string
 	logf := func(format string, args ...any) { notices = append(notices, fmt.Sprintf(format, args...)) }
-	got, err := Resolve(context.Background(), "ubuntu-24.04", cache, logf)
+	got, err := Resolve(context.Background(), "ubuntu-24.04", c.cache, c.fetch, logf)
 	assert.NoError(t, err)
 	assert.Equal(t, got, dir)
-	assert.Len(t, notices, 1)
-	assert.That(t, strings.HasPrefix(notices[0], "release ubuntu-24.04: cannot reach github ("), notices[0])
-	assert.That(t, strings.HasSuffix(notices[0], "); using the cached copy"), notices[0])
+	assert.EqualArrays(t, notices, []string{"release ubuntu-24.04: chisel cannot refresh it; using its cached copy\n  chisel find: exit status 1\n  error: cannot talk to release repository"})
 
-	// Nothing cached: the error stands.
-	_, err = Resolve(context.Background(), "ubuntu-24.04", t.TempDir(), nil)
-	assert.Error(t, err, "cannot fetch release ubuntu-24.04")
+	// Nothing cached: chisel's error stands.
+	_, err = Resolve(context.Background(), "ubuntu-26.04", c.cache, c.fetch, logf)
+	assert.Error(t, err, "cannot talk to release repository")
+
+	// Interrupted: the copy is not an answer.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.fail = context.Canceled
+	_, err = Resolve(ctx, "ubuntu-24.04", c.cache, c.fetch, logf)
+	assert.Error(t, err, "context canceled")
 }
 
-func TestExtractRejectsEscapes(t *testing.T) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	assert.NoError(t, tw.WriteHeader(&tar.Header{Name: "top/../../evil", Typeflag: tar.TypeReg, Mode: 0644, Size: 0}))
-	assert.NoError(t, tw.Close())
-	assert.NoError(t, gz.Close())
-	err := extract(&buf, t.TempDir())
-	assert.Error(t, err, "escapes the release")
+func TestResolveExpectsChiselsLayout(t *testing.T) {
+	c := &chisel{cache: t.TempDir()}
+	elsewhere := &chisel{cache: t.TempDir()}
+	_, err := Resolve(context.Background(), "ubuntu-24.04", c.cache, elsewhere.fetch, nil)
+	assert.Error(t, err, "chisel fetched release ubuntu-24.04 but left nothing at "+filepath.Join(c.cache, "releases", "ubuntu-24.04"))
 }

@@ -28,7 +28,7 @@ func Binary() string {
 	return "chisel"
 }
 
-// Runner runs chisel. Verbose, when set, receives every cut's output as it
+// Runner runs chisel. Verbose, when set, receives every chisel's output as it
 // happens, each line as "<stamp> <arch> <slice> <text>" with chisel's own
 // timestamp stripped. CacheHome, when set, is the XDG_CACHE_HOME chisel runs
 // with, so a private view of the cache can stand in for the shared one.
@@ -87,20 +87,7 @@ func (r *Runner) Cut(ctx context.Context, release, root, arch, slice string) (*R
 	}
 	args := []string{"cut", "--release", release, "--root", root, "--arch", arch,
 		"--ignore", "unmaintained", "--ignore", "unstable", slice}
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
-	cmd.WaitDelay = 5 * time.Second
-	if r.CacheHome != "" {
-		cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+r.CacheHome)
-	}
-	var out bytes.Buffer
-	var w io.Writer = &out
-	if r.Verbose != nil {
-		w = io.MultiWriter(&out, &prefixWriter{w: r.Verbose, prefix: arch + " " + slice + " "})
-	}
-	cmd.Stdout = w
-	cmd.Stderr = w
-
+	cmd, out := r.command(ctx, args, arch+" "+slice+" ")
 	if err := cmd.Run(); err != nil {
 		pkg, _, _ := strings.Cut(slice, "_")
 		if strings.Contains(out.String(), fmt.Sprintf("cannot find package %q in archive", pkg)) {
@@ -125,6 +112,36 @@ func (r *Runner) Cut(ctx context.Context, release, root, arch, slice string) (*R
 		}
 	}
 	return res, nil
+}
+
+// Fetch has chisel fetch, or refresh, the release named name into its own
+// cache, through a find that matches nothing. A failure is an *Error.
+func (r *Runner) Fetch(ctx context.Context, name string) error {
+	args := []string{"find", "--release", name, "chisel-coverage-nothing"}
+	cmd, out := r.command(ctx, args, "release "+name+" ")
+	if err := cmd.Run(); err != nil {
+		return &Error{Args: append([]string{r.Bin}, args...), Output: out.String(), Err: err}
+	}
+	return nil
+}
+
+// command is chisel with args, interrupted when ctx is done, its output
+// collected and, with Verbose, streamed under prefix.
+func (r *Runner) command(ctx context.Context, args []string, prefix string) (*exec.Cmd, *bytes.Buffer) {
+	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 5 * time.Second
+	if r.CacheHome != "" {
+		cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+r.CacheHome)
+	}
+	out := &bytes.Buffer{}
+	var w io.Writer = out
+	if r.Verbose != nil {
+		w = io.MultiWriter(out, &prefixWriter{w: r.Verbose, prefix: prefix})
+	}
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd, out
 }
 
 // Walk lists every entry under root as an absolute path, sorted, with

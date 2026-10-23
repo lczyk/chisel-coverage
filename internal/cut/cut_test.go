@@ -85,6 +85,24 @@ func TestCutClassifiesFailures(t *testing.T) {
 // stamped matches the timestamp every logged line starts with.
 var stamped = regexp.MustCompile(`(?m)^\d\d-\d\d-\d\dT\d\d:\d\d:\d\d `)
 
+func TestFetch(t *testing.T) {
+	r := fake(t)
+	t.Setenv("FAKE_SAYS", "Fetching current ubuntu-24.04 release...")
+	t.Setenv("FAKE_CODE", "0")
+	var seen bytes.Buffer
+	r.Verbose = &seen
+	assert.NoError(t, r.Fetch(context.Background(), "ubuntu-24.04"))
+	assert.ContainsString(t, seen.String(), " release ubuntu-24.04 Fetching current ubuntu-24.04 release...\n")
+
+	t.Setenv("FAKE_SAYS", "error: cannot talk to release repository")
+	t.Setenv("FAKE_CODE", "1")
+	err := r.Fetch(context.Background(), "ubuntu-24.04")
+	var e *Error
+	assert.That(t, errors.As(err, &e), "%v", err)
+	assert.EqualArrays(t, e.Args[1:], []string{"find", "--release", "ubuntu-24.04", "chisel-coverage-nothing"})
+	assert.Error(t, err, "exit status 1\n  error: cannot talk to release repository")
+}
+
 func TestStamp(t *testing.T) {
 	assert.That(t, stamped.MatchString(Stamp()+" "), Stamp())
 }
