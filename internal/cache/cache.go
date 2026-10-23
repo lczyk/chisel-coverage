@@ -34,6 +34,15 @@ func Dir() string {
 	return ""
 }
 
+// Base is the tool's own cache dir, next to chisel's: views and fetched
+// releases live there. It is "" when Dir is.
+func Base() string {
+	if d := Dir(); d != "" {
+		return filepath.Join(filepath.Dir(d), "chisel-slice-coverage")
+	}
+	return ""
+}
+
 // View is a private copy of the shared cache for one chisel at a time.
 type View struct {
 	Home   string // the XDG_CACHE_HOME to run chisel with
@@ -56,6 +65,7 @@ var blob = regexp.MustCompile(`^[0-9a-f]+$`)
 // behind for more than a day are removed on the way.
 func New(shared string) (*View, error) {
 	base := filepath.Join(filepath.Dir(shared), "chisel-slice-coverage")
+	// Not Base(): shared may be a test's own dir rather than chisel's.
 	if err := os.MkdirAll(base, 0755); err != nil {
 		return nil, err
 	}

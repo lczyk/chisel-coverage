@@ -58,7 +58,7 @@ func TestParseArgs(t *testing.T) {
 	f, _, err = parseArgs([]string{"--release", "/r", "-h"}, &help)
 	assert.NoError(t, err)
 	assert.That(t, f.help && !f.Version)
-	assert.ContainsString(t, help.String(), "--release=<dir>")
+	assert.ContainsString(t, help.String(), "--release=<dir|name>")
 	assert.ContainsString(t, help.String(), "(default: .)")
 	f, _, err = parseArgs([]string{"bash", "--version"}, io.Discard)
 	assert.NoError(t, err)
