@@ -74,7 +74,9 @@ type run struct {
 	work     string
 	prepared []*prepared
 	results  []Package
-	jobs     int // cuts allowed to run at once
+	jobs     int             // cuts allowed to run at once
+	took     []time.Duration // per package, its lead arch's cut wall time
+	viewCost time.Duration   // of making and removing one view; 0 without a cache
 	mu       sync.Mutex
 	views    []*cache.View // idle views, for the next worker
 }
@@ -112,8 +114,11 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{opts: opts, jobs: jobs(opts.Jobs)}
+	r := &run{opts: opts, jobs: jobs(opts.Jobs), took: make([]time.Duration, len(pkgs))}
 	defer r.cleanup()
+	if r.jobs > 1 && opts.Cache != "" {
+		r.viewCost = cache.Cost(opts.Cache)
+	}
 	for _, pkg := range pkgs {
 		p, err := r.prepare(chiselYAML, pkg, only[pkg])
 		if err != nil {
@@ -268,20 +273,26 @@ func jobs(n int) int {
 	return n
 }
 
-// phase cuts the units in order over as many workers as cuts may run at
-// once. A lone worker shares chisel's cache, since nothing can race it.
+// phase cuts the units in order over the workers it gets. The first worker
+// shares chisel's cache: a view's blobs enter it only as complete files
+// linked into place, which never trips a chisel reading or writing beside
+// them. Every other worker has a view.
 func (r *run) phase(units []unit) {
-	n := min(r.jobs, len(units))
+	n := r.workers(units)
 	next := make(chan unit)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w := r.worker(n > 1)
+			w := r.worker(i > 0)
 			defer w.close()
 			for u := range next {
+				start := time.Now()
 				r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
+				if u.ai == 0 {
+					r.took[u.pi] = time.Since(start)
+				}
 				w.merge()
 			}
 		}()
@@ -291,6 +302,22 @@ func (r *run) phase(units []unit) {
 	}
 	close(next)
 	wg.Wait()
+}
+
+// workers is how many workers a phase gets: as many as cuts may run at once,
+// but no more than its work pays for, since every worker past the first
+// costs a view, and a view of a big cache costs about as much as cutting a
+// small package. The lead phase has nothing measured yet and gets them all.
+func (r *run) workers(units []unit) int {
+	n := min(r.jobs, len(units))
+	var work time.Duration
+	for _, u := range units {
+		work += r.took[u.pi]
+	}
+	if n <= 1 || r.viewCost == 0 || work == 0 {
+		return n
+	}
+	return min(n, 1+int(work/r.viewCost))
 }
 
 // worker makes a worker, with a view of the cache when asked to isolate:
@@ -422,8 +449,8 @@ func (r *run) cleanup() {
 }
 
 // cutf reports one finished cut on the Verbose writer as
-// "<arch> <slice> <paths>p <seconds>s"; a package missing for the
-// architecture is "n/a", a glob matching nothing "0p", a failure "error".
+// "<arch> <slice> <paths> <seconds>s"; a package missing for the
+// architecture is "n/a", a glob matching nothing "0", a failure "error".
 func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Duration) {
 	if r.opts.Verbose == nil {
 		return

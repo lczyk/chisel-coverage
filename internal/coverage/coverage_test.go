@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -324,15 +325,22 @@ func TestRunJobsUseCacheViews(t *testing.T) {
 			assert.That(t, a.Available)
 		}
 	}
-	// Every cut ran in a view, never in the shared cache.
+	// The first worker cuts in the shared cache, the second in a view; each
+	// phase has one unit for each.
 	homes, err := os.ReadFile(os.Getenv("FAKE_HOMES"))
 	assert.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(homes)), "\n")
 	assert.Len(t, lines, 2*(4+2))
 	base := filepath.Join(filepath.Dir(shared), "chisel-slice-coverage")
+	inView := 0
 	for _, h := range lines {
+		if h == os.Getenv("XDG_CACHE_HOME") {
+			continue
+		}
 		assert.That(t, strings.HasPrefix(h, base+string(filepath.Separator)+"view-"), h)
+		inView++
 	}
+	assert.That(t, inView > 0 && inView < len(lines), strconv.Itoa(inView))
 	// Each distinct cut's blob was merged back, and no view is left behind.
 	blobs, err := os.ReadDir(filepath.Join(shared, "sha256"))
 	assert.NoError(t, err)

@@ -159,6 +159,18 @@ func (v *View) Merge() error {
 	})
 }
 
+// A hard link costs about this long on apfs and ext4, and a view is linked
+// once and removed once, which is what Cost adds up.
+const perBlob = 400 * time.Microsecond
+
+// Cost estimates how long New and Remove take for a view of shared, so a
+// caller can tell whether a worker has enough work to be worth one.
+func Cost(shared string) time.Duration {
+	n := 0
+	_ = eachBlob(shared, func(_, _ string) error { n++; return nil })
+	return max(time.Millisecond, time.Duration(n)*perBlob)
+}
+
 // Remove deletes the view. Blobs not merged are lost.
 func (v *View) Remove() error {
 	return os.RemoveAll(v.Home)
