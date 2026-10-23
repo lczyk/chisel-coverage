@@ -112,7 +112,7 @@ func TestRenderText(t *testing.T) {
 	var out bytes.Buffer
 	renderText(&out, sample(), true, style{})
 	assert.Equal(t, out.String(), `bash 5.2-1 [amd64, arm64]
-total 6  covered 3  ignored 1  uncovered 2
+total 6 covered 3 ignored 1 uncovered 2
 /usr/lib/
 /usr/lib/<arch>-linux-<gnu>/
 bash [i386]: not available
@@ -120,9 +120,9 @@ bash [s390x]: error
   chisel cut ... exited 1
     boom
 tzdata 2026a-1 (all) [amd64]
-total 1  covered 1  ignored 0  uncovered 0
+total 1 covered 1 ignored 0 uncovered 0
 empty [amd64]
-total 0  covered 0  ignored 0  uncovered 0
+total 0 covered 0 ignored 0 uncovered 0
 `)
 }
 
@@ -130,12 +130,12 @@ func TestRenderTextUngrouped(t *testing.T) {
 	var out bytes.Buffer
 	renderText(&out, sample()[:1], false, style{})
 	assert.Equal(t, out.String(), `bash 5.2-1 [amd64]
-total 6  covered 3  ignored 1  uncovered 2
+total 6 covered 3 ignored 1 uncovered 2
 /usr/lib/
 /usr/lib/x86_64-linux-gnu/
 bash [i386]: not available
 bash 5.2-1 [arm64]
-total 6  covered 3  ignored 1  uncovered 2
+total 6 covered 3 ignored 1 uncovered 2
 /usr/lib/
 /usr/lib/aarch64-linux-gnu/
 bash [s390x]: error
@@ -148,9 +148,9 @@ func TestRenderTextColoured(t *testing.T) {
 	var out bytes.Buffer
 	renderText(&out, sample(), true, colours)
 	assert.ContainsString(t, out.String(), "\x1b[1;34mbash\x1b[0m 5.2-1 \x1b[2m[amd64, arm64]\x1b[0m\n")
-	assert.ContainsString(t, out.String(), "total 6  \x1b[32mcovered 3\x1b[0m  \x1b[33mignored 1\x1b[0m  \x1b[31muncovered 2\x1b[0m\n/usr/lib/\n")
-	assert.ContainsString(t, out.String(), "total 1  \x1b[32mcovered 1\x1b[0m  \x1b[32mignored 0\x1b[0m  \x1b[32muncovered 0\x1b[0m\n")
-	assert.ContainsString(t, out.String(), "total 0  \x1b[33mcovered 0\x1b[0m  ")
+	assert.ContainsString(t, out.String(), "total 6 \x1b[32mcovered 3\x1b[0m \x1b[33mignored 1\x1b[0m \x1b[31muncovered 2\x1b[0m\n/usr/lib/\n")
+	assert.ContainsString(t, out.String(), "total 1 \x1b[32mcovered 1\x1b[0m \x1b[32mignored 0\x1b[0m \x1b[32muncovered 0\x1b[0m\n")
+	assert.ContainsString(t, out.String(), "total 0 \x1b[33mcovered 0\x1b[0m ")
 	assert.ContainsString(t, out.String(), ": \x1b[33mnot available\x1b[0m\n")
 	assert.ContainsString(t, out.String(), ": \x1b[31merror\x1b[0m\n")
 }
@@ -262,7 +262,7 @@ func TestMainExitCodes(t *testing.T) {
 
 	code, out := captureStdout(t, func() int { return Main([]string{"--release", rel, "--arch", "amd64", "demo"}) })
 	assert.Equal(t, code, 0)
-	assert.ContainsString(t, out, "demo [amd64]\ntotal 7  covered 3  ignored 0  uncovered 4\n")
+	assert.ContainsString(t, out, "demo [amd64]\ntotal 7 covered 3 ignored 0 uncovered 4\n")
 	assert.ContainsString(t, out, "\n/usr/share/doc/demo/README\n")
 
 	code, _ = captureStdout(t, func() int {

@@ -433,11 +433,11 @@ func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Dur
 	case errors.Is(err, cut.ErrNotAvailable):
 		what = "n/a"
 	case errors.Is(err, cut.ErrNoContent):
-		what = "0p"
+		what = "0"
 	case err != nil:
 		what = "error"
 	default:
-		what = fmt.Sprintf("%dp", len(res.Paths))
+		what = fmt.Sprintf("%d", len(res.Paths))
 	}
 	stampf(r.opts.Verbose, "%s %s %s %.1fs", arch, slice, what, took.Seconds())
 }

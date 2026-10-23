@@ -371,9 +371,9 @@ func TestRunVerbose(t *testing.T) {
 		lines = append(lines, took.ReplaceAllString(stamped.ReplaceAllString(l, ""), ""))
 	}
 	assert.EqualArrays(t, lines, []string{
-		"amd64 bash_cov-all 19p",
-		"amd64 bash_config 3p",
-		"amd64 bash_bins 4p",
+		"amd64 bash_cov-all 19",
+		"amd64 bash_config 3",
+		"amd64 bash_bins 4",
 		"amd64 bash_copyright error",
 		"riscv64 bash_cov-all n/a",
 	})

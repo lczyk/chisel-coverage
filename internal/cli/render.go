@@ -89,7 +89,7 @@ func renderGroup(w io.Writer, p coverage.Package, g coverage.Group, s style) {
 		}
 	}
 	fmt.Fprintf(w, "%s %s\n", head, arches)
-	fmt.Fprintf(w, "total %d  %s  %s  %s\n", g.Total,
+	fmt.Fprintf(w, "total %d %s %s %s\n", g.Total,
 		s.count("covered", len(g.Covered), false, s.yellow),
 		s.count("ignored", len(g.Ignored), true, s.yellow),
 		s.count("uncovered", len(g.Uncovered), true, s.red))
