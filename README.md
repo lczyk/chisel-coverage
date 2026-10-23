@@ -1,5 +1,10 @@
 # chisel-coverage
 
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com)
+[![chisel](https://img.shields.io/badge/%F0%9F%94%A8-chisel-E95420)](https://github.com/canonical/chisel)
+![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/lczyk/chisel-coverage)
+![GitHub Tag](https://img.shields.io/github/v/tag/lczyk/chisel-coverage?label=release)
+
 development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture.
 
 ## why
