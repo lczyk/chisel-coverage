@@ -126,6 +126,32 @@ total 0 covered 0 ignored 0 uncovered 0
 `)
 }
 
+func TestRenderTextBlocksPerShippedSet(t *testing.T) {
+	// One more path uncovered on amd64, one more covered on arm64: a block
+	// for what both ship, then one per architecture with its real path.
+	pkgs := sample()[:1]
+	pkgs[0].Arches = []coverage.Arch{pkgs[0].Arches[0], pkgs[0].Arches[2]}
+	pkgs[0].Arches[0].Uncovered = append(pkgs[0].Arches[0].Uncovered, "/usr/lib/x86_64-linux-gnu/bash/")
+	pkgs[0].Arches[0].Total = 7
+	pkgs[0].Arches[1].Covered = append(pkgs[0].Arches[1].Covered, "/usr/bin/sh")
+	pkgs[0].Arches[1].Total = 7
+	var out bytes.Buffer
+	renderText(&out, pkgs, true, style{})
+	assert.Equal(t, out.String(), `bash 5.2-1 [amd64, arm64]
+total 6 covered 3 ignored 1 uncovered 2
+/usr/lib/
+/usr/lib/<arch>-linux-<gnu>/
+bash 5.2-1 [amd64]
+total 1 covered 0 ignored 0 uncovered 1
+/usr/lib/x86_64-linux-gnu/bash/
+bash 5.2-1 [arm64]
+total 1 covered 1 ignored 0 uncovered 0
+`)
+	out.Reset()
+	renderText(&out, pkgs, false, style{})
+	assert.ContainsString(t, out.String(), "bash 5.2-1 [amd64]\ntotal 7 covered 3 ignored 1 uncovered 3\n/usr/lib/\n/usr/lib/x86_64-linux-gnu/\n/usr/lib/x86_64-linux-gnu/bash/\nbash 5.2-1 [arm64]\ntotal 7 covered 4 ignored 1 uncovered 2\n")
+}
+
 func TestRenderTextUngrouped(t *testing.T) {
 	var out bytes.Buffer
 	renderText(&out, sample()[:1], false, style{})

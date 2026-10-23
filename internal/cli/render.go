@@ -53,11 +53,11 @@ func (s style) count(label string, n int, wantZero bool, warn string) string {
 	return s.wrap(warn, text)
 }
 
-// renderText prints one block per group of architectures with the same
-// result (or per architecture, when group is false), per package: a header
-// line, a counts line, then the uncovered paths one per line. Nothing is
-// indented and no line is blank, so the output greps and pipes. What each
-// slice takes is only in the JSON.
+// renderText prints one block per group of architectures (or per
+// architecture, when group is false), per package: a header line, a counts
+// line, then the uncovered paths one per line. Nothing is indented and no
+// line is blank, so the output greps and pipes. What each slice takes is
+// only in the JSON.
 func renderText(w io.Writer, pkgs []coverage.Package, group bool, s style) {
 	for _, p := range pkgs {
 		groups := coverage.Ungrouped(p)

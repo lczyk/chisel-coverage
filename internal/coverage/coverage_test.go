@@ -513,13 +513,13 @@ func TestNormalise(t *testing.T) {
 }
 
 func TestGroupsSingletonKeepsRealPaths(t *testing.T) {
-	arch := func(name, path string) Arch {
-		return Arch{Arch: name, Available: true, Version: "1", Uncovered: []string{path}, Ignored: []string{}, Covered: []string{}, Slices: map[string][]string{}}
+	arch := func(name, version, path string) Arch {
+		return Arch{Arch: name, Available: true, Version: version, Uncovered: []string{path}, Ignored: []string{}, Covered: []string{}, Slices: map[string][]string{}}
 	}
 	g := Groups(Package{Arches: []Arch{
-		arch("amd64", "/usr/lib/x86_64-linux-gnu/"),
-		arch("arm64", "/usr/lib/aarch64-linux-gnu/"),
-		arch("s390x", "/usr/lib/s390x-linux-gnu/ld64.so.1"),
+		arch("amd64", "1", "/usr/lib/x86_64-linux-gnu/"),
+		arch("arm64", "1", "/usr/lib/aarch64-linux-gnu/"),
+		arch("s390x", "2", "/usr/lib/s390x-linux-gnu/ld64.so.1"),
 	}})
 	assert.Len(t, g, 2)
 	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
@@ -540,20 +540,81 @@ func TestGroupsFoldArchAllOnRealPaths(t *testing.T) {
 	assert.EqualArrays(t, g[0].Uncovered, []string{"/usr/share/go/src/runtime/sys_amd64.s"})
 }
 
-func TestGroupsSplitOnAnyDifference(t *testing.T) {
+func TestGroupsFoldOnWhatIsShipped(t *testing.T) {
 	base := func(arch string) Arch {
-		return Arch{Arch: arch, Available: true, Version: "1", Uncovered: []string{"/a"}, Ignored: []string{}, Covered: []string{}, Slices: map[string][]string{"bins": {"/b"}}}
+		return Arch{Arch: arch, Available: true, Version: "1", Total: 3, Uncovered: []string{"/a"}, Ignored: []string{}, Covered: []string{"/b", "/d"}, Slices: map[string][]string{"bins": {"/b", "/d"}}}
 	}
 	same := base("arm64")
 	version := base("i386")
 	version.Version = "2"
-	slice := base("s390x")
-	slice.Slices["bins"] = []string{"/c"}
-	g := Groups(Package{Arches: []Arch{base("amd64"), same, version, slice}})
+	fewer := base("s390x")
+	fewer.Total = 2
+	fewer.Covered = []string{"/b"}
+	more := base("ppc64el")
+	more.Total = 5
+	more.Uncovered = []string{"/a", "/usr/lib/powerpc64le-linux-gnu/e"}
+	more.Ignored = []string{"/i"}
+	g := Groups(Package{Arches: []Arch{base("amd64"), same, version, fewer, more}})
+	assert.Len(t, g, 4)
+	// What all four ship, what three ship, what one ships (real paths),
+	// then the other version.
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64", "s390x", "ppc64el"})
+	assert.Equal(t, g[0].Total, 2)
+	assert.EqualArrays(t, g[0].Covered, []string{"/b"})
+	assert.EqualArrays(t, g[0].Uncovered, []string{"/a"})
+	assert.EqualArrays(t, g[0].Ignored, []string{})
+	assert.EqualArrays(t, g[1].Arches, []string{"amd64", "arm64", "ppc64el"})
+	assert.Equal(t, g[1].Total, 1)
+	assert.EqualArrays(t, g[1].Covered, []string{"/d"})
+	assert.EqualArrays(t, g[1].Uncovered, []string{})
+	assert.EqualArrays(t, g[2].Arches, []string{"ppc64el"})
+	assert.Equal(t, g[2].Total, 2)
+	assert.EqualArrays(t, g[2].Uncovered, []string{"/usr/lib/powerpc64le-linux-gnu/e"})
+	assert.EqualArrays(t, g[2].Ignored, []string{"/i"})
+	assert.EqualArrays(t, g[3].Arches, []string{"i386"})
+	assert.Equal(t, g[3].Total, 3)
+	assert.Equal(t, g[3].Version, "2")
+	assert.EqualArrays(t, g[3].Covered, []string{"/b", "/d"})
+}
+
+func TestGroupsMostArchesFirst(t *testing.T) {
+	arch := func(name string, uncovered ...string) Arch {
+		return Arch{Arch: name, Available: true, Version: "1", Total: len(uncovered), Uncovered: uncovered, Ignored: []string{}, Covered: []string{}, Slices: map[string][]string{}}
+	}
+	g := Groups(Package{Arches: []Arch{
+		arch("amd64", "/a", "/x"),
+		arch("arm64", "/a", "/y", "/x"),
+		arch("armhf", "/a", "/y", "/z"),
+		arch("i386", "/y", "/z"),
+	}})
+	assert.Len(t, g, 4)
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64", "armhf"})
+	assert.EqualArrays(t, g[0].Uncovered, []string{"/a"})
+	assert.EqualArrays(t, g[1].Arches, []string{"arm64", "armhf", "i386"})
+	assert.EqualArrays(t, g[1].Uncovered, []string{"/y"})
+	assert.EqualArrays(t, g[2].Arches, []string{"amd64", "arm64"})
+	assert.EqualArrays(t, g[2].Uncovered, []string{"/x"})
+	assert.EqualArrays(t, g[3].Arches, []string{"armhf", "i386"})
+	assert.EqualArrays(t, g[3].Uncovered, []string{"/z"})
+}
+
+func TestGroupsSplitOnState(t *testing.T) {
+	// A slice taking a path on one architecture only: covered there,
+	// uncovered elsewhere, so the path is in a group of each.
+	amd64 := Arch{Arch: "amd64", Available: true, Version: "1", Total: 3, Covered: []string{"/c", "/i"}, Uncovered: []string{"/u"}, Ignored: []string{}}
+	arm64 := Arch{Arch: "arm64", Available: true, Version: "1", Total: 3, Covered: []string{}, Uncovered: []string{"/c", "/u"}, Ignored: []string{"/i"}}
+	g := Groups(Package{Arches: []Arch{amd64, arm64}})
 	assert.Len(t, g, 3)
 	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
-	assert.EqualArrays(t, g[1].Arches, []string{"i386"})
-	assert.EqualArrays(t, g[2].Arches, []string{"s390x"})
+	assert.Equal(t, g[0].Total, 1)
+	assert.EqualArrays(t, g[0].Uncovered, []string{"/u"})
+	assert.EqualArrays(t, g[1].Arches, []string{"amd64"})
+	assert.Equal(t, g[1].Total, 2)
+	assert.EqualArrays(t, g[1].Covered, []string{"/c", "/i"})
+	assert.EqualArrays(t, g[2].Arches, []string{"arm64"})
+	assert.Equal(t, g[2].Total, 2)
+	assert.EqualArrays(t, g[2].Uncovered, []string{"/c"})
+	assert.EqualArrays(t, g[2].Ignored, []string{"/i"})
 }
 
 func TestFinishAndWorkers(t *testing.T) {

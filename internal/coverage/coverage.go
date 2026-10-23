@@ -807,45 +807,49 @@ func alnum(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
-// Group is a set of architectures with the same result. A group of several
-// architectures holds the normalised paths, which stand for all of them; a
-// group of one holds that architecture's real paths.
+// Group is a block of the report: a set of architectures of one version
+// and the paths their debs all ship, with the counts of that set alone.
+// Several architectures share the normalised paths, which stand for all
+// of them; a group of one holds its real paths.
 type Group struct {
-	Arches []string
-	Arch
+	Arches    []string
+	Available bool
+	Err       error
+	Version   string
+	DebArch   string
+	Total     int
+	Covered   []string
+	Uncovered []string
+	Ignored   []string
 }
 
-// Groups folds a package's architectures into groups with identical results:
-// the same version and availability, and the same uncovered, ignored and
-// per-slice sets after Normalise. An arch: all package is one deb for every
+// Groups folds a package's architectures of the same version and
+// availability on what their debs ship: every path, after Normalise, is
+// keyed by the architectures it is on with the same state (covered,
+// ignored or uncovered: a slice may take it on some architectures only),
+// and each key is a group, most architectures first. An architecture's
+// groups sum to its deb. An arch: all package is one deb for every
 // architecture, so its paths are compared as they are: a Go source tree
-// names every architecture somewhere and would never fold otherwise. Failed
-// cuts are never grouped.
+// names every architecture somewhere and would never fold otherwise.
+// Failed cuts are never grouped.
 func Groups(p Package) []Group {
-	var groups []Group
-	var raw []Arch
+	var members [][]Arch
 	index := map[string]int{}
 	for _, a := range p.Arches {
-		n := a
-		if a.DebArch != "all" {
-			n = normalised(a)
-		}
-		key := groupKey(n)
+		key := fmt.Sprintf("%v\x00%s", a.Available, a.Version)
 		if a.Err != nil {
 			key = "err\x00" + a.Arch
 		}
 		if i, ok := index[key]; ok {
-			groups[i].Arches = append(groups[i].Arches, a.Arch)
+			members[i] = append(members[i], a)
 			continue
 		}
-		index[key] = len(groups)
-		groups = append(groups, Group{Arches: []string{a.Arch}, Arch: n})
-		raw = append(raw, a)
+		index[key] = len(members)
+		members = append(members, []Arch{a})
 	}
-	for i := range groups {
-		if len(groups[i].Arches) == 1 {
-			groups[i].Arch = raw[i]
-		}
+	var groups []Group
+	for _, m := range members {
+		groups = append(groups, fold(m)...)
 	}
 	return groups
 }
@@ -854,49 +858,106 @@ func Groups(p Package) []Group {
 func Ungrouped(p Package) []Group {
 	groups := make([]Group, 0, len(p.Arches))
 	for _, a := range p.Arches {
-		groups = append(groups, Group{Arches: []string{a.Arch}, Arch: a})
+		groups = append(groups, whole(a))
 	}
 	return groups
 }
 
-func normalised(a Arch) Arch {
-	n := a
-	n.Covered = normaliseAll(a.Covered, a.Arch)
-	n.Uncovered = normaliseAll(a.Uncovered, a.Arch)
-	n.Ignored = normaliseAll(a.Ignored, a.Arch)
-	n.Slices = map[string][]string{}
-	for name, paths := range a.Slices {
-		n.Slices[name] = normaliseAll(paths, a.Arch)
+func whole(a Arch) Group {
+	return Group{
+		Arches: []string{a.Arch}, Available: a.Available, Err: a.Err, Version: a.Version, DebArch: a.DebArch,
+		Total: a.Total, Covered: a.Covered, Uncovered: a.Uncovered, Ignored: a.Ignored,
 	}
-	return n
 }
 
-func normaliseAll(paths []string, arch string) []string {
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		out = append(out, Normalise(p, arch))
-	}
-	sort.Strings(out)
-	return out
+const (
+	covered = iota
+	ignored
+	uncovered
+)
+
+// entry is one normalised path in one state: the architectures it is on,
+// in group order, and its real name on each.
+type entry struct {
+	arches []string
+	raw    []string
+	state  int
 }
 
-func groupKey(a Arch) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%v\x00%s\x00%v\x00", a.Available, a.Version, a.DebArch == "all")
-	for _, set := range [][]string{a.Uncovered, a.Ignored} {
-		b.WriteString(strings.Join(set, "\x00"))
-		b.WriteString("\x01")
+// fold splits architectures of one version into groups by what they ship.
+func fold(arches []Arch) []Group {
+	if len(arches) == 1 {
+		return []Group{whole(arches[0])}
 	}
-	names := make([]string, 0, len(a.Slices))
-	for name := range a.Slices {
-		names = append(names, name)
+	first := arches[0]
+	entries := map[string]*entry{}
+	for _, a := range arches {
+		for state, paths := range [][]string{a.Covered, a.Ignored, a.Uncovered} {
+			for _, raw := range paths {
+				path := raw
+				if a.DebArch != "all" {
+					path = Normalise(raw, a.Arch)
+				}
+				key := fmt.Sprintf("%d\x00%s", state, path)
+				e := entries[key]
+				if e == nil {
+					e = &entry{state: state}
+					entries[key] = e
+				}
+				e.arches = append(e.arches, a.Arch)
+				e.raw = append(e.raw, raw)
+			}
+		}
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		b.WriteString(name)
-		b.WriteString("\x02")
-		b.WriteString(strings.Join(a.Slices[name], "\x00"))
-		b.WriteString("\x01")
+	index := map[string]int{}
+	var groups []Group
+	for key, e := range entries {
+		_, path, _ := strings.Cut(key, "\x00")
+		key = strings.Join(e.arches, " ")
+		i, ok := index[key]
+		if !ok {
+			i = len(groups)
+			index[key] = i
+			groups = append(groups, Group{
+				Arches: e.arches, Available: first.Available, Version: first.Version, DebArch: first.DebArch,
+				Covered: []string{}, Uncovered: []string{}, Ignored: []string{},
+			})
+		}
+		if len(e.arches) == 1 {
+			path = e.raw[0]
+		}
+		g := &groups[i]
+		g.Total++
+		switch e.state {
+		case covered:
+			g.Covered = append(g.Covered, path)
+		case ignored:
+			g.Ignored = append(g.Ignored, path)
+		case uncovered:
+			g.Uncovered = append(g.Uncovered, path)
+		}
 	}
-	return b.String()
+	for i := range groups {
+		sort.Strings(groups[i].Covered)
+		sort.Strings(groups[i].Ignored)
+		sort.Strings(groups[i].Uncovered)
+	}
+	order := map[string]int{}
+	for i, a := range arches {
+		order[a.Arch] = i
+	}
+	// Most architectures first, then in the version's order.
+	sort.SliceStable(groups, func(i, j int) bool {
+		a, b := groups[i].Arches, groups[j].Arches
+		if len(a) != len(b) {
+			return len(a) > len(b)
+		}
+		for k := range a {
+			if a[k] != b[k] {
+				return order[a[k]] < order[b[k]]
+			}
+		}
+		return false
+	})
+	return groups
 }
