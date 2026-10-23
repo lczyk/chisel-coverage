@@ -14,6 +14,7 @@ import (
 
 	"github.com/lczyk/assert"
 
+	"github.com/lczyk/chisel-slice-coverage/internal/cache"
 	"github.com/lczyk/chisel-slice-coverage/internal/cut"
 )
 
@@ -553,4 +554,24 @@ func TestGroupsSplitOnAnyDifference(t *testing.T) {
 	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
 	assert.EqualArrays(t, g[1].Arches, []string{"i386"})
 	assert.EqualArrays(t, g[2].Arches, []string{"s390x"})
+}
+
+func TestFinishAndWorkers(t *testing.T) {
+	s := time.Second
+	// One free worker, the rest one seed apart: 16s of cuts over 4 workers
+	// end at (16 + 2.5 + 5 + 7.5) / 4.
+	assert.Equal(t, finish(16*s, 4, 1, 2500*time.Millisecond), 7750*time.Millisecond)
+	// A worker that would start after the end does not count.
+	assert.Equal(t, finish(2*s, 3, 1, 5*s), 2*s)
+	// Pooled views are free.
+	assert.Equal(t, finish(7*s, 4, 4, 2500*time.Millisecond), 1750*time.Millisecond)
+
+	r := &run{jobs: 8, viewCost: 6 * s, seed: 2500 * time.Millisecond}
+	assert.Equal(t, r.workers(16*s, 66), 4)
+	assert.Equal(t, r.workers(2*s, 66), 1)
+	r.views = make([]*cache.View, 3)
+	assert.Equal(t, r.workers(7*s, 18), 4)
+	r.viewCost = 0
+	assert.Equal(t, r.workers(7*s, 18), 8)
+	assert.Equal(t, r.workers(7*s, 3), 3)
 }

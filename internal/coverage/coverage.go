@@ -77,7 +77,10 @@ type run struct {
 	prepared []*prepared
 	results  []Package
 	jobs     int             // cuts allowed to run at once
-	took     []time.Duration // per package, its lead arch's cut wall time
+	took     []time.Duration // per package, the wall time of its lead arch cuts so far
+	seed     time.Duration   // the last view's seeding time; 0 until one was
+	done     []int           // per package, the cuts behind took
+	cells    [][]cell        // per package and architecture, what its cuts found
 	viewCost time.Duration   // of making and removing one view; 0 without a cache
 	start    time.Time
 	rm       sync.WaitGroup // rootfs dirs being removed in the background
@@ -89,12 +92,21 @@ type run struct {
 	bytes    int64
 }
 
-// unit is one package on one architecture.
-type unit struct{ pi, ai int }
+// unit is one slice of one package on one architecture, ci indexing the
+// package's cuts; 0 is the whole-deb slice.
+type unit struct{ pi, ai, ci int }
 
-// worker cuts one package at a time on one architecture with its own view of
-// chisel's cache, merged back after every package so the others gain the
-// blobs.
+// cell collects what the cuts of one package on one architecture found.
+type cell struct {
+	avail   bool // the whole-deb cut found the package
+	err     error
+	version string
+	debArch string
+	sets    map[string][]string // slice -> paths in its rootfs
+}
+
+// worker cuts one slice at a time on one architecture with its own view of
+// chisel's cache, merged back after every cut so the others gain the blobs.
 type worker struct {
 	r       *run
 	runner  cut.Runner
@@ -124,7 +136,7 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{ctx: ctx, opts: opts, jobs: jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), start: time.Now()}
+	r := &run{ctx: ctx, opts: opts, jobs: jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), done: make([]int, len(pkgs)), start: time.Now()}
 	defer r.cleanup()
 	if r.jobs > 1 && opts.Cache != "" {
 		r.viewCost = cache.Cost(opts.Cache)
@@ -136,6 +148,7 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		}
 		r.prepared = append(r.prepared, p)
 		r.results = append(r.results, Package{Name: pkg, Slices: p.slices, Arches: make([]Arch, len(opts.Arches))})
+		r.cells = append(r.cells, make([]cell, len(opts.Arches)))
 	}
 	r.work, err = os.MkdirTemp("", "chisel-slice-coverage-*")
 	if err != nil {
@@ -151,20 +164,20 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 	// same files everywhere it exists; then everything else.
 	var lead, probes, rest []unit
 	for pi := range r.prepared {
-		lead = append(lead, unit{pi, 0})
+		lead = append(lead, unit{pi, 0, 0})
 	}
-	r.phase(lead)
+	r.pass(lead)
 	for ai := 1; ai < len(opts.Arches); ai++ {
 		for pi := range r.prepared {
 			if a := r.results[pi].Arches[0]; a.Available && a.Err == nil && a.DebArch == "all" {
-				probes = append(probes, unit{pi, ai})
+				probes = append(probes, unit{pi, ai, 0})
 			} else {
-				rest = append(rest, unit{pi, ai})
+				rest = append(rest, unit{pi, ai, 0})
 			}
 		}
 	}
 	r.probePhase(probes)
-	r.phase(rest)
+	r.pass(rest)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -294,13 +307,25 @@ func jobs(n int) int {
 	return n
 }
 
-// phase cuts the units in order over the workers it gets. The first worker
-// shares chisel's cache: a view's blobs enter it only as complete files
-// linked into place, which never trips a chisel reading or writing beside
-// them. Every other worker has a view.
-func (r *run) phase(units []unit) {
-	n := r.workers(units)
-	next := make(chan unit)
+// pass cuts the whole-deb slice of each (package, architecture) given and,
+// as each finds its package, the package's other slices, then assembles the
+// results. Workers feed the queue themselves, so no slice is cut where there
+// is no package and no worker waits for the others between the two.
+func (r *run) pass(whole []unit) {
+	var work time.Duration
+	total := 0
+	for _, u := range whole {
+		cuts := len(r.prepared[u.pi].cuts)
+		total += cuts
+		work += r.avg(u.pi) * time.Duration(cuts)
+	}
+	n := r.workers(work, total)
+	queue := make(chan unit, total)
+	var pm sync.Mutex
+	pending := len(whole)
+	for _, u := range whole {
+		queue <- u
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -308,43 +333,112 @@ func (r *run) phase(units []unit) {
 			defer wg.Done()
 			w := r.worker(i > 0)
 			defer w.close()
-			for u := range next {
+			for u := range queue {
 				w.prepare(r.opts.Arches[u.ai], r.prepared[u.pi].def.Package)
 				start := time.Now()
-				r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
+				r.cutUnit(w, u)
 				if u.ai == 0 {
-					r.took[u.pi] = time.Since(start)
+					r.mu.Lock()
+					r.took[u.pi] += time.Since(start)
+					r.done[u.pi]++
+					r.mu.Unlock()
 				}
 				w.merge()
+				more := r.followUps(u)
+				pm.Lock()
+				for _, f := range more {
+					queue <- f
+				}
+				pending += len(more) - 1
+				if pending == 0 {
+					close(queue)
+				}
+				pm.Unlock()
 			}
 		}()
 	}
-units:
-	for _, u := range units {
-		select {
-		case next <- u:
-		case <-r.ctx.Done():
-			break units
-		}
-	}
-	close(next)
 	wg.Wait()
+	for _, u := range whole {
+		r.results[u.pi].Arches[u.ai] = r.assemble(u.pi, u.ai)
+	}
 }
 
-// workers is how many workers a phase gets: as many as cuts may run at once,
-// but no more than its work pays for, since every worker past the first
-// costs a view, and a view of a big cache costs about as much as cutting a
-// small package. The lead phase has nothing measured yet and gets them all.
-func (r *run) workers(units []unit) int {
-	n := min(r.jobs, len(units))
-	var work time.Duration
-	for _, u := range units {
-		work += r.took[u.pi]
+// followUps is what a finished unit puts on the queue: the package's other
+// slices once its whole-deb cut found it, nothing otherwise or once the run
+// is being stopped.
+func (r *run) followUps(u unit) []unit {
+	if u.ci != 0 || r.ctx.Err() != nil {
+		return nil
 	}
-	if n <= 1 || r.viewCost == 0 || work == 0 {
-		return n
+	r.mu.Lock()
+	c := r.cells[u.pi][u.ai]
+	r.mu.Unlock()
+	if !c.avail || c.err != nil {
+		return nil
 	}
-	return min(n, 1+int(work/r.viewCost))
+	var more []unit
+	for ci := 1; ci < len(r.prepared[u.pi].cuts); ci++ {
+		more = append(more, unit{u.pi, u.ai, ci})
+	}
+	return more
+}
+
+// avg is what a cut of the package has taken on the lead architecture so
+// far, a second before anything is measured.
+func (r *run) avg(pi int) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.done[pi] == 0 {
+		return time.Second
+	}
+	return r.took[pi] / time.Duration(r.done[pi])
+}
+
+// workers is how many workers a pass of units gets for work seconds of
+// cuts: as many as cuts may run at once, but no more than pay off. The first
+// worker and every pooled view are free; each further worker waits for its
+// view, and views are seeded one at a time, so the k-th new one starts k
+// seeds in. A worker is added only while it brings the end of the pass
+// nearer.
+func (r *run) workers(work time.Duration, units int) int {
+	most := min(r.jobs, units)
+	if most <= 1 || r.viewCost == 0 {
+		return most
+	}
+	r.mu.Lock()
+	free, seed := 1+len(r.views), r.seed
+	r.mu.Unlock()
+	if seed == 0 {
+		seed = r.viewCost
+	}
+	best, end := 1, work
+	for k := 2; k <= most; k++ {
+		e := finish(work, k, free, seed)
+		if e >= end {
+			break
+		}
+		best, end = k, e
+	}
+	return best
+}
+
+// finish is when k workers are done with work seconds of cuts, free of them
+// starting at once and the rest one seed apart: the workers' active time
+// adds up to the work.
+func finish(work time.Duration, k, free int, seed time.Duration) time.Duration {
+	starts := make([]time.Duration, k)
+	for i := free; i < k; i++ {
+		starts[i] = time.Duration(i-free+1) * seed
+	}
+	var sum time.Duration
+	for m := 1; m <= k; m++ {
+		sum += starts[m-1]
+		end := (work + sum) / time.Duration(m)
+		if m == k || end <= starts[m] {
+			return end
+		}
+	}
+	return work
 }
 
 // probePhase runs the probes, one worker per architecture and no views:
@@ -416,12 +510,16 @@ func (w *worker) prepare(arch, pkg string) {
 		// seeding views one at a time costs nothing overall and gets the
 		// first one out sooner.
 		r.seeding.Lock()
+		start := time.Now()
 		view, err := cache.New(r.opts.Cache)
 		r.seeding.Unlock()
 		if err != nil {
 			r.logf("%s %s_cov-cache-view error: %v; sharing chisel's cache instead", arch, pkg, err)
 			return
 		}
+		r.mu.Lock()
+		r.seed = time.Since(start)
+		r.mu.Unlock()
 		r.verbosef("%s %s_cov-cache-view %d", arch, pkg, view.Blobs())
 		w.view = view
 	}
@@ -452,31 +550,59 @@ func (w *worker) close() {
 	}
 }
 
-func (r *run) cutPackage(w *worker, p *prepared, arch string) Arch {
-	a := Arch{Arch: arch, Slices: map[string][]string{}}
-	sets := map[string][]string{}
-	for _, name := range p.cuts {
-		root := filepath.Join(r.work, p.def.Package, arch, name)
-		res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
-		r.cutf(arch, p.def.Package+"_"+name, res, err)
-		r.discard(root)
-		if errors.Is(err, cut.ErrNotAvailable) && name == sdf.AllSlice {
-			return a
-		}
+// cutUnit cuts one slice into its cell. Once a cut of the cell has failed
+// the rest are skipped, since the architecture reports the error anyway.
+func (r *run) cutUnit(w *worker, u unit) {
+	p, arch := r.prepared[u.pi], r.opts.Arches[u.ai]
+	name := p.cuts[u.ci]
+	c := &r.cells[u.pi][u.ai]
+	r.mu.Lock()
+	failed := c.err != nil
+	r.mu.Unlock()
+	if failed {
+		return
+	}
+	root := filepath.Join(r.work, p.def.Package, arch, name)
+	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
+	r.cutf(arch, p.def.Package+"_"+name, res, err)
+	r.discard(root)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case errors.Is(err, cut.ErrNotAvailable) && name == sdf.AllSlice:
+		// Not on this architecture; the cell stays unavailable.
+	case errors.Is(err, cut.ErrNoContent) && sdf.IsIgnore(name):
 		// An ignore glob matching nothing in this package ignores nothing.
-		if errors.Is(err, cut.ErrNoContent) && sdf.IsIgnore(name) {
-			continue
+	case err != nil:
+		if c.err == nil {
+			c.err = err
 		}
-		if err != nil {
-			a.Err = err
-			return a
+	default:
+		if c.sets == nil {
+			c.sets = map[string][]string{}
 		}
-		sets[name] = res.Paths
+		c.sets[name] = res.Paths
 		if name == sdf.AllSlice {
-			a.Version, a.DebArch = res.Version, res.DebArch
+			c.avail = true
+			c.version, c.debArch = res.Version, res.DebArch
 		}
 	}
+}
+
+// assemble turns a cell into the architecture's result.
+func (r *run) assemble(pi, ai int) Arch {
+	p, c := r.prepared[pi], r.cells[pi][ai]
+	a := Arch{Arch: r.opts.Arches[ai], Slices: map[string][]string{}}
+	if c.err != nil {
+		a.Err = c.err
+		return a
+	}
+	if !c.avail {
+		return a
+	}
+	sets := c.sets
 	a.Available = true
+	a.Version, a.DebArch = c.version, c.debArch
 
 	covered := map[string]bool{}
 	for _, name := range p.slices {
