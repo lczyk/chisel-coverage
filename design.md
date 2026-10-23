@@ -14,7 +14,7 @@ the python prototype (`thething-2`) fetched debs itself and matched sdf globs wi
 
 for each package:
 
-1. read `<release>/chisel.yaml` verbatim and `<release>/slices/<package>.yaml`. `--release` is a checkout, or a release name like `ubuntu-24.04`: then the branch tarball is fetched from github the way chisel fetches it, into `~/.cache/chisel-coverage/releases/<name>`, refreshed by etag on every run and served from the cache when github is unreachable.
+1. read `<release>/chisel.yaml` verbatim and `<release>/slices/<package>.yaml`. `--release` is a checkout, or a release name like `ubuntu-24.04`: then chisel fetches it (`chisel find --release <name>` with a query matching nothing, so chisel's own etag check refreshes its copy) and the copy under `~/.cache/chisel/releases/<name>` is read; when chisel cannot reach github and the copy exists, the copy serves with a notice. nothing of chisel's fetching is reimplemented, only its cache layout is relied on.
 2. synthesise one sdf holding, for the same package:
     - `cov-all` with a single entry `/**` -- the whole deb.
     - every real slice, stripped (see below). with `--slice`, only those.
@@ -129,7 +129,7 @@ mirrors chisel-proxy: `cmd/`, `internal/{cli,sdf,cut,coverage}`, `version.go` + 
 - `internal/sdf` -- read an sdf, strip, synthesise.
 - `internal/cut` -- run one chisel cut, classify its failure, read the version line, walk a rootfs.
 - `internal/cache` -- private views of chisel's cache for concurrent cuts.
-- `internal/release` -- `--release` as a checkout or a release name fetched from github and cached.
+- `internal/release` -- `--release` as a checkout or a release name fetched by chisel and read from its cache.
 - `internal/coverage` -- the worker pool, set arithmetic, normalisation and grouping.
 - `internal/cli` -- flags, text and json rendering, exit codes.
 
