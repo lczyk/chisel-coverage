@@ -116,6 +116,8 @@ slices:
   cov-all:
     contents:
       /**:
+  cov-probe:
+    contents: {}
   bins:
     contents:
       /usr/bin/bash:

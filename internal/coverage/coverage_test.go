@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ import (
 // one arch are caught. With $FAKE_CACHE set it behaves like chisel's cache:
 // it fails unless blob $FAKE_CACHE is in $XDG_CACHE_HOME/chisel/sha256/, then
 // writes a blob named after the cut there and appends $XDG_CACHE_HOME to
-// $FAKE_HOMES.
+// $FAKE_HOMES. A <arch>/<pkg>.all marker makes the fetched deb an arch: all one.
 const fakeChisel = `#!/bin/sh
 while [ $# -gt 1 ]; do
   case "$1" in
@@ -52,7 +53,9 @@ if [ ! -d "$FAKE_TREES/$arch/${pkg}_cov-all" ]; then
   exit 1
 fi
 if [ -f "$FAKE_TREES/$arch/$pkg.version" ]; then
-  echo "Fetching pool/main/x/$pkg/${pkg}_$(cat "$FAKE_TREES/$arch/$pkg.version")_$arch.deb..." >&2
+  debarch=$arch
+  [ -f "$FAKE_TREES/$arch/$pkg.all" ] && debarch=all
+  echo "Fetching pool/main/x/$pkg/${pkg}_$(cat "$FAKE_TREES/$arch/$pkg.version")_$debarch.deb..." >&2
 fi
 tree="$FAKE_TREES/$arch/$slice"
 if [ -d "$tree" ]; then cp -R "$tree/." "$root/"; fi
@@ -350,6 +353,32 @@ func TestRunJobsUseCacheViews(t *testing.T) {
 	assert.Len(t, views, 0)
 }
 
+func TestRunArchAllPackagesAreProbed(t *testing.T) {
+	f := setup(t)
+	for _, arch := range []string{"amd64", "arm64"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(f.trees, arch, "dash.version"), []byte("0.5"), 0644))
+		touch(t, filepath.Join(f.trees, arch, "dash.all"))
+	}
+	res, err := Run(Options{Release: f.release, Arches: []string{"amd64", "arm64", "riscv64"}, Runner: f.runner}, []string{"dash", "bash"})
+	assert.NoError(t, err)
+	cuts := f.cuts(t)
+	// dash is cut in full on the lead arch only, probed on the rest; bash is
+	// cut in full on every arch it exists on.
+	assert.That(t, slices.Contains(cuts, "amd64 dash_cov-all"))
+	assert.That(t, slices.Contains(cuts, "arm64 dash_cov-probe"))
+	assert.That(t, slices.Contains(cuts, "riscv64 dash_cov-probe"))
+	assert.That(t, !slices.Contains(cuts, "arm64 dash_cov-all"))
+	assert.That(t, slices.Contains(cuts, "arm64 bash_cov-all"))
+	dash := res[0]
+	assert.Equal(t, dash.Arches[0].DebArch, "all")
+	assert.That(t, dash.Arches[1].Available)
+	assert.Equal(t, dash.Arches[1].Arch, "arm64")
+	assert.Equal(t, dash.Arches[1].Version, "0.5")
+	assert.EqualArrays(t, dash.Arches[1].Covered, dash.Arches[0].Covered)
+	assert.EqualArrays(t, dash.Arches[1].Uncovered, dash.Arches[0].Uncovered)
+	assert.That(t, !dash.Arches[2].Available)
+}
+
 func TestRunJobsCapsConcurrentCuts(t *testing.T) {
 	f := setup(t)
 	locks := t.TempDir()
@@ -448,6 +477,18 @@ func TestGroupsSingletonKeepsRealPaths(t *testing.T) {
 	assert.EqualArrays(t, g[0].Uncovered, []string{"/usr/lib/<arch>-linux-<gnu>/"})
 	assert.EqualArrays(t, g[1].Arches, []string{"s390x"})
 	assert.EqualArrays(t, g[1].Uncovered, []string{"/usr/lib/s390x-linux-gnu/ld64.so.1"})
+}
+
+func TestGroupsFoldArchAllOnRealPaths(t *testing.T) {
+	// The same files everywhere; normalising would turn "amd64" into <arch>
+	// for amd64 only and keep the two apart.
+	arch := func(name string) Arch {
+		return Arch{Arch: name, Available: true, Version: "1", DebArch: "all", Uncovered: []string{"/usr/share/go/src/runtime/sys_amd64.s"}, Ignored: []string{}, Covered: []string{}, Slices: map[string][]string{}}
+	}
+	g := Groups(Package{Arches: []Arch{arch("amd64"), arch("arm64")}})
+	assert.Len(t, g, 1)
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
+	assert.EqualArrays(t, g[0].Uncovered, []string{"/usr/share/go/src/runtime/sys_amd64.s"})
 }
 
 func TestGroupsSplitOnAnyDifference(t *testing.T) {

@@ -78,6 +78,7 @@ type run struct {
 	took     []time.Duration // per package, its lead arch's cut wall time
 	viewCost time.Duration   // of making and removing one view; 0 without a cache
 	start    time.Time
+	rm       sync.WaitGroup // rootfs dirs being removed in the background
 	mu       sync.Mutex
 	seeding  sync.Mutex    // views are seeded one at a time, see worker
 	views    []*cache.View // idle views, for the next worker
@@ -86,8 +87,16 @@ type run struct {
 	bytes    int64
 }
 
-// unit is one package on one architecture.
-type unit struct{ pi, ai int }
+// unit is one package on one architecture. A probe only checks that the
+// package exists there: an arch: all package cut on the lead architecture
+// has the same files everywhere it exists.
+type unit struct {
+	pi, ai int
+	probe  bool
+}
+
+// A probe is a cut with nothing to extract, about this long on a warm cache.
+const probeCost = time.Second
 
 // worker cuts one package at a time on one architecture with its own view of
 // chisel's cache, merged back after every package so the others gain the
@@ -142,18 +151,18 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 	}
 
 	// The lead architecture alone first, so the rest find the arch: all debs
-	// cached, then every other architecture.
+	// cached and the arch: all packages known, then every other architecture.
 	var lead, rest []unit
-	for ai := range opts.Arches {
-		for pi := range r.prepared {
-			if ai == 0 {
-				lead = append(lead, unit{pi, ai})
-			} else {
-				rest = append(rest, unit{pi, ai})
-			}
-		}
+	for pi := range r.prepared {
+		lead = append(lead, unit{pi: pi, ai: 0})
 	}
 	r.phase(lead)
+	for ai := 1; ai < len(opts.Arches); ai++ {
+		for pi := range r.prepared {
+			a := r.results[pi].Arches[0]
+			rest = append(rest, unit{pi: pi, ai: ai, probe: a.Available && a.Err == nil && a.DebArch == "all"})
+		}
+	}
 	r.phase(rest)
 	r.removeViews()
 	r.verbosef("%d cuts %d paths %.1fmb %.1fs", r.cuts, r.paths, float64(r.bytes)/1e6, time.Since(r.start).Seconds())
@@ -298,7 +307,11 @@ func (r *run) phase(units []unit) {
 			for u := range next {
 				w.prepare(r.opts.Arches[u.ai], r.prepared[u.pi].def.Package)
 				start := time.Now()
-				r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
+				if u.probe {
+					r.results[u.pi].Arches[u.ai] = r.probe(w, u)
+				} else {
+					r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
+				}
 				if u.ai == 0 {
 					r.took[u.pi] = time.Since(start)
 				}
@@ -321,7 +334,11 @@ func (r *run) workers(units []unit) int {
 	n := min(r.jobs, len(units))
 	var work time.Duration
 	for _, u := range units {
-		work += r.took[u.pi]
+		if u.probe {
+			work += probeCost
+		} else {
+			work += r.took[u.pi]
+		}
 	}
 	if n <= 1 || r.viewCost == 0 || work == 0 {
 		return n
@@ -400,9 +417,7 @@ func (r *run) cutPackage(w *worker, p *prepared, arch string) Arch {
 		start := time.Now()
 		res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
 		r.cutf(arch, p.def.Package+"_"+name, res, err, time.Since(start))
-		if !r.opts.Keep {
-			_ = os.RemoveAll(root)
-		}
+		r.discard(root)
 		if errors.Is(err, cut.ErrNotAvailable) && name == sdf.AllSlice {
 			return a
 		}
@@ -471,7 +486,45 @@ func (r *run) removeViews() {
 	r.views = nil
 }
 
+// probe cuts the empty probe slice of an arch: all package on another
+// architecture and, when the package is there, hands back the lead
+// architecture's result for it.
+func (r *run) probe(w *worker, u unit) Arch {
+	p, arch := r.prepared[u.pi], r.opts.Arches[u.ai]
+	root := filepath.Join(r.work, p.def.Package, arch, sdf.ProbeSlice)
+	start := time.Now()
+	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+sdf.ProbeSlice)
+	r.cutf(arch, p.def.Package+"_"+sdf.ProbeSlice, res, err, time.Since(start))
+	r.discard(root)
+	if errors.Is(err, cut.ErrNotAvailable) {
+		return Arch{Arch: arch}
+	}
+	if err != nil {
+		return Arch{Arch: arch, Err: err}
+	}
+	a := r.results[u.pi].Arches[0]
+	a.Arch = arch
+	if res.Version != "" {
+		a.Version, a.DebArch = res.Version, res.DebArch
+	}
+	return a
+}
+
+// discard removes a cut's rootfs in the background, since a big one is
+// thousands of unlinks the worker need not wait for. Kept with --keep.
+func (r *run) discard(root string) {
+	if r.opts.Keep {
+		return
+	}
+	r.rm.Add(1)
+	go func() {
+		defer r.rm.Done()
+		_ = os.RemoveAll(root)
+	}()
+}
+
 func (r *run) cleanup() {
+	r.rm.Wait()
 	r.removeViews()
 	if r.opts.Keep {
 		return
@@ -597,13 +650,19 @@ type Group struct {
 
 // Groups folds a package's architectures into groups with identical results:
 // the same version and availability, and the same uncovered, ignored and
-// per-slice sets after Normalise. Failed cuts are never grouped.
+// per-slice sets after Normalise. An arch: all package is one deb for every
+// architecture, so its paths are compared as they are: a Go source tree
+// names every architecture somewhere and would never fold otherwise. Failed
+// cuts are never grouped.
 func Groups(p Package) []Group {
 	var groups []Group
 	var raw []Arch
 	index := map[string]int{}
 	for _, a := range p.Arches {
-		n := normalised(a)
+		n := a
+		if a.DebArch != "all" {
+			n = normalised(a)
+		}
 		key := groupKey(n)
 		if a.Err != nil {
 			key = "err\x00" + a.Arch

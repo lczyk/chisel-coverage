@@ -13,12 +13,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Slice names the tool adds to the synthesised file: the whole-deb slice and
-// one slice per ignore glob, IgnorePrefix followed by the glob's index. Valid
-// chisel slice names, unlikely to clash with a real one.
+// Slice names the tool adds to the synthesised file: the whole-deb slice,
+// one slice per ignore glob, IgnorePrefix followed by the glob's index, and
+// an empty slice whose cut only tells whether the package exists for an
+// architecture. Valid chisel slice names, unlikely to clash with a real one.
 const (
 	AllSlice     = "cov-all"
 	IgnorePrefix = "cov-ignore-"
+	ProbeSlice   = "cov-probe"
 )
 
 // IsIgnore reports whether name is one of the ignore slices.
@@ -205,10 +207,11 @@ func Synthesise(d *Definition, only []string, ignores []string) (file []byte, cu
 		slice := &yaml.Node{Kind: yaml.MappingNode}
 		slice.Content = append(slice.Content, str("contents"), contents)
 		slices.Content = append(slices.Content, str(name), slice)
-		cuts = append(cuts, name)
 	}
 
 	addSlice(AllSlice, []Entry{{Path: "/**"}})
+	cuts = append(cuts, AllSlice)
+	addSlice(ProbeSlice, nil)
 
 	wanted := map[string]bool{}
 	for _, name := range only {
@@ -221,16 +224,19 @@ func Synthesise(d *Definition, only []string, ignores []string) (file []byte, cu
 		if only != nil && !wanted[s.Name] {
 			continue
 		}
-		if s.Name == AllSlice || IsIgnore(s.Name) {
+		if s.Name == AllSlice || s.Name == ProbeSlice || IsIgnore(s.Name) {
 			return nil, nil, fmt.Errorf("%s: slice name %q is reserved by chisel-slice-coverage", d.Package, s.Name)
 		}
 		if len(s.Entries) > 0 {
 			addSlice(s.Name, s.Entries)
+			cuts = append(cuts, s.Name)
 		}
 	}
 
 	for i, g := range ignores {
-		addSlice(fmt.Sprintf("%s%d", IgnorePrefix, i), []Entry{{Path: g}})
+		name := fmt.Sprintf("%s%d", IgnorePrefix, i)
+		addSlice(name, []Entry{{Path: g}})
+		cuts = append(cuts, name)
 	}
 
 	var buf bytes.Buffer
