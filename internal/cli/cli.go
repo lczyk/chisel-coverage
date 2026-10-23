@@ -13,6 +13,7 @@ import (
 	ver "github.com/lczyk/version/go"
 
 	chiselslicecoverage "github.com/lczyk/chisel-slice-coverage"
+	"github.com/lczyk/chisel-slice-coverage/internal/cache"
 	"github.com/lczyk/chisel-slice-coverage/internal/coverage"
 	"github.com/lczyk/chisel-slice-coverage/internal/cut"
 )
@@ -52,6 +53,10 @@ func Main(args []string) int {
 		errf(err)
 		return 2
 	}
+	if f.Jobs == 0 || f.Jobs < -1 {
+		errf(fmt.Errorf("--jobs must be at least 1, or -1 for one per cpu"))
+		return 2
+	}
 
 	runner := &cut.Runner{Bin: cut.Binary()}
 	opts := coverage.Options{
@@ -60,6 +65,8 @@ func Main(args []string) int {
 		Only:    f.Slices,
 		Ignores: f.Ignores,
 		Keep:    f.Keep,
+		Jobs:    f.Jobs,
+		Cache:   cache.Dir(),
 		Runner:  runner,
 		Log:     os.Stderr,
 	}
@@ -108,6 +115,7 @@ type flags struct {
 	JSON          bool     `long:"json" description:"machine-readable output, one entry per architecture"`
 	FailUncovered bool     `long:"fail-uncovered" description:"exit 1 when any architecture has uncovered paths"`
 	Keep          bool     `long:"keep" description:"keep the temp releases and rootfs dirs"`
+	Jobs          int      `short:"j" long:"jobs" value-name:"<n>" default:"-1" description:"cuts to run at once; -1 for one per cpu"`
 	Verbose       []bool   `short:"v" long:"verbose" description:"one line per cut on stderr; twice also streams chisel's output"`
 	Version       bool     `long:"version" description:"print the version and exit"`
 

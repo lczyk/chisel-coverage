@@ -29,10 +29,12 @@ func Binary() string {
 
 // Runner runs chisel. Verbose, when set, receives every cut's output as it
 // happens, each line as "<stamp> <arch> <slice> <text>" with chisel's own
-// timestamp stripped.
+// timestamp stripped. CacheHome, when set, is the XDG_CACHE_HOME chisel runs
+// with, so a private view of the cache can stand in for the shared one.
 type Runner struct {
-	Bin     string
-	Verbose io.Writer
+	Bin       string
+	Verbose   io.Writer
+	CacheHome string
 }
 
 // Result is a successful cut.
@@ -83,6 +85,9 @@ func (r *Runner) Cut(release, root, arch, slice string) (*Result, error) {
 	args := []string{"cut", "--release", release, "--root", root, "--arch", arch,
 		"--ignore", "unmaintained", "--ignore", "unstable", slice}
 	cmd := exec.Command(r.Bin, args...)
+	if r.CacheHome != "" {
+		cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+r.CacheHome)
+	}
 	var out bytes.Buffer
 	var w io.Writer = &out
 	if r.Verbose != nil {
@@ -158,7 +163,7 @@ func Stamp() string {
 var chiselStamp = regexp.MustCompile(`^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d `)
 
 // prefixWriter stamps and prefixes every line it is handed and drops chisel's
-// timestamp. Lanes write concurrently, so each line is written to the
+// timestamp. Workers write concurrently, so each line is written to the
 // underlying writer in one call.
 type prefixWriter struct {
 	w      io.Writer

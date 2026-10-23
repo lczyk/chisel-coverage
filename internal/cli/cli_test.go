@@ -31,6 +31,13 @@ func TestParseArgs(t *testing.T) {
 	f, _, err = parseArgs([]string{"-vv", "bash"}, io.Discard)
 	assert.NoError(t, err)
 	assert.Len(t, f.Verbose, 2)
+	assert.Equal(t, f.Jobs, -1)
+	f, _, err = parseArgs([]string{"-j", "4", "bash"}, io.Discard)
+	assert.NoError(t, err)
+	assert.Equal(t, f.Jobs, 4)
+	f, _, err = parseArgs([]string{"--jobs=-1", "bash"}, io.Discard)
+	assert.NoError(t, err)
+	assert.Equal(t, f.Jobs, -1)
 
 	f, _, err = parseArgs([]string{"bash"}, io.Discard)
 	assert.NoError(t, err)
@@ -227,6 +234,8 @@ func fixture(t *testing.T) string {
 	t.Setenv("CHISEL", bin)
 	t.Setenv("FAKE_TREES", filepath.Join(tmp, "trees"))
 	t.Setenv("FAKE_FAIL", "")
+	// Main views the real chisel cache otherwise.
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
 	return rel
 }
 

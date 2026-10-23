@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	temprelease "github.com/lczyk/chisel-proxy/pkg/temp-release"
 
+	"github.com/lczyk/chisel-slice-coverage/internal/cache"
 	"github.com/lczyk/chisel-slice-coverage/internal/cut"
 	"github.com/lczyk/chisel-slice-coverage/internal/sdf"
 )
@@ -28,12 +30,14 @@ var AllArches = []string{"amd64", "arm64", "armhf", "i386", "ppc64el", "riscv64"
 // Options configures a run.
 type Options struct {
 	Release string
-	Arches  []string // the first is the lead lane
+	Arches  []string // the first is cut alone before the rest
 	Only    []string // --slice values, bare or <package>_<slice>; nil means all
 	Ignores []string
 	Keep    bool
+	Jobs    int    // cuts running at once; 0 or 1 is one after another, -1 one per cpu
+	Cache   string // chisel's cache dir, for per-worker views; "" shares it as is
 	Runner  *cut.Runner
-	Log     io.Writer // --keep notices; nil discards
+	Log     io.Writer // notices (--keep, cache trouble); nil discards
 	Verbose io.Writer // one line per cut; nil discards
 }
 
@@ -70,15 +74,32 @@ type run struct {
 	work     string
 	prepared []*prepared
 	results  []Package
+	jobs     int // cuts allowed to run at once
+	mu       sync.Mutex
+	views    []*cache.View // idle views, for the next worker
+}
+
+// unit is one package on one architecture.
+type unit struct{ pi, ai int }
+
+// worker cuts one package at a time on one architecture with its own view of
+// chisel's cache, merged back after every package so the others gain the
+// blobs.
+type worker struct {
+	r      *run
+	runner cut.Runner
+	view   *cache.View
 }
 
 // Run cuts every package on every architecture and returns the results in
-// input order. It fails up front on a bad release, a bad slice definition or
-// an unknown --slice; a failed cut is reported per architecture instead.
+// input order, a package given twice once. It fails up front on a bad
+// release, a bad slice definition or an unknown --slice; a failed cut is
+// reported per architecture instead.
 func Run(opts Options, pkgs []string) ([]Package, error) {
 	if len(pkgs) == 0 {
 		return nil, fmt.Errorf("no packages given")
 	}
+	pkgs = unique(pkgs)
 	if len(opts.Arches) == 0 {
 		return nil, fmt.Errorf("no architectures given")
 	}
@@ -91,7 +112,7 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{opts: opts}
+	r := &run{opts: opts, jobs: jobs(opts.Jobs)}
 	defer r.cleanup()
 	for _, pkg := range pkgs {
 		p, err := r.prepare(chiselYAML, pkg, only[pkg])
@@ -109,19 +130,34 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 		r.logf("rootfs dirs: %s", r.work)
 	}
 
-	// The lead lane alone first, then the rest in parallel: see design.md on
-	// chisel's cache.
-	r.lane(0)
-	var wg sync.WaitGroup
-	for ai := 1; ai < len(opts.Arches); ai++ {
-		wg.Add(1)
-		go func(ai int) {
-			defer wg.Done()
-			r.lane(ai)
-		}(ai)
+	// The lead architecture alone first, so the rest find the arch: all debs
+	// cached, then every other architecture.
+	var lead, rest []unit
+	for ai := range opts.Arches {
+		for pi := range r.prepared {
+			if ai == 0 {
+				lead = append(lead, unit{pi, ai})
+			} else {
+				rest = append(rest, unit{pi, ai})
+			}
+		}
 	}
-	wg.Wait()
+	r.phase(lead)
+	r.phase(rest)
 	return r.results, nil
+}
+
+// unique drops repeats, keeping the first occurrence's place.
+func unique(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // resolveOnly maps each package to the slices --slice keeps for it. A package
@@ -221,20 +257,98 @@ func (r *run) anyExists(names []string) bool {
 	return false
 }
 
-func (r *run) lane(ai int) {
-	arch := r.opts.Arches[ai]
-	for pi, p := range r.prepared {
-		r.results[pi].Arches[ai] = r.cutPackage(p, arch)
+// jobs is how many cuts may run at once for a --jobs value.
+func jobs(n int) int {
+	switch {
+	case n < 0:
+		return runtime.NumCPU()
+	case n == 0:
+		return 1
+	}
+	return n
+}
+
+// phase cuts the units in order over as many workers as cuts may run at
+// once. A lone worker shares chisel's cache, since nothing can race it.
+func (r *run) phase(units []unit) {
+	n := min(r.jobs, len(units))
+	next := make(chan unit)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := r.worker(n > 1)
+			defer w.close()
+			for u := range next {
+				r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
+				w.merge()
+			}
+		}()
+	}
+	for _, u := range units {
+		next <- u
+	}
+	close(next)
+	wg.Wait()
+}
+
+// worker makes a worker, with a view of the cache when asked to isolate:
+// one an earlier worker left when there is one. Without a cache dir, or when
+// no view can be made, the worker shares chisel's cache as is.
+func (r *run) worker(isolate bool) *worker {
+	w := &worker{r: r, runner: *r.opts.Runner}
+	if !isolate || r.opts.Cache == "" {
+		return w
+	}
+	r.mu.Lock()
+	if n := len(r.views); n > 0 {
+		w.view, r.views = r.views[n-1], r.views[:n-1]
+	}
+	r.mu.Unlock()
+	if w.view == nil {
+		view, err := cache.New(r.opts.Cache)
+		if err != nil {
+			r.logf("cache view: %v; sharing chisel's cache instead", err)
+			return w
+		}
+		w.view = view
+	}
+	w.runner.CacheHome = w.view.Home
+	return w
+}
+
+func (w *worker) cut(release, root, arch, slice string) (*cut.Result, error) {
+	return w.runner.Cut(release, root, arch, slice)
+}
+
+// merge publishes what the worker's view fetched into the shared cache.
+func (w *worker) merge() {
+	if w.view == nil {
+		return
+	}
+	if err := w.view.Merge(); err != nil {
+		w.r.logf("cache view: %v", err)
 	}
 }
 
-func (r *run) cutPackage(p *prepared, arch string) Arch {
+// close hands the view back for the next worker.
+func (w *worker) close() {
+	w.merge()
+	if w.view != nil {
+		w.r.mu.Lock()
+		w.r.views = append(w.r.views, w.view)
+		w.r.mu.Unlock()
+	}
+}
+
+func (r *run) cutPackage(w *worker, p *prepared, arch string) Arch {
 	a := Arch{Arch: arch, Slices: map[string][]string{}}
 	sets := map[string][]string{}
 	for _, name := range p.cuts {
 		root := filepath.Join(r.work, p.def.Package, arch, name)
 		start := time.Now()
-		res, err := r.opts.Runner.Cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
+		res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
 		r.cutf(arch, p.def.Package+"_"+name, res, err, time.Since(start))
 		if !r.opts.Keep {
 			_ = os.RemoveAll(root)
@@ -293,6 +407,9 @@ func (r *run) cutPackage(p *prepared, arch string) Arch {
 }
 
 func (r *run) cleanup() {
+	for _, v := range r.views {
+		_ = v.Remove()
+	}
 	if r.opts.Keep {
 		return
 	}
@@ -331,7 +448,7 @@ func (r *run) logf(format string, args ...any) {
 	}
 }
 
-// stampf writes one timestamped line in a single call, since lanes log
+// stampf writes one timestamped line in a single call, since workers log
 // concurrently. See cut.Stamp for the line format.
 func stampf(w io.Writer, format string, args ...any) {
 	fmt.Fprintf(w, "%s "+format+"\n", append([]any{cut.Stamp()}, args...)...)

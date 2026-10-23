@@ -18,7 +18,10 @@ import (
 // fails a glob matching nothing; a <arch>/<pkg>.version file is logged the way
 // chisel logs a fetch. Every cut appends "<arch> <slice>" to $FAKE_LOG and, with
 // $FAKE_LOCKS set, holds a per-arch lock for a moment so overlapping cuts on
-// one arch are caught.
+// one arch are caught. With $FAKE_CACHE set it behaves like chisel's cache:
+// it fails unless blob $FAKE_CACHE is in $XDG_CACHE_HOME/chisel/sha256/, then
+// writes a blob named after the cut there and appends $XDG_CACHE_HOME to
+// $FAKE_HOMES.
 const fakeChisel = `#!/bin/sh
 while [ $# -gt 1 ]; do
   case "$1" in
@@ -34,6 +37,12 @@ if [ -n "$FAKE_LOCKS" ]; then
   mkdir "$FAKE_LOCKS/$arch" 2>/dev/null || { echo "overlapping cut on $arch" >&2; exit 1; }
   sleep 0.05
   rmdir "$FAKE_LOCKS/$arch"
+fi
+if [ -n "$FAKE_CACHE" ]; then
+  blobs="$XDG_CACHE_HOME/chisel/sha256"
+  [ -f "$blobs/$FAKE_CACHE" ] || { echo "seed blob missing from $blobs" >&2; exit 1; }
+  printf '%s %s' "$arch" "$slice" > "$blobs/$(printf '%s %s' "$arch" "$slice" | cksum | cut -d' ' -f1)"
+  printf '%s\n' "$XDG_CACHE_HOME" >> "$FAKE_HOMES"
 fi
 case " $FAKE_FAIL " in *" $slice "*) echo "boom" >&2; exit 1;; esac
 case " $FAKE_NOCONTENT " in *" $slice "*) echo "error: cannot extract from package \"$pkg\": no content at /nope/**" >&2; exit 1;; esac
@@ -72,6 +81,14 @@ slices:
       pass
 `
 
+const dashYAML = `package: dash
+
+slices:
+  bins:
+    contents:
+      /usr/bin/dash:
+`
+
 type fixture struct {
 	tmp     string // $TMPDIR for the run, so leftovers are visible
 	release string
@@ -98,6 +115,7 @@ func setup(t *testing.T) *fixture {
 	assert.NoError(t, os.MkdirAll(filepath.Join(f.release, "slices"), 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "chisel.yaml"), []byte("format: v1\n"), 0644))
 	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "slices", "bash.yaml"), []byte(bashYAML), 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "slices", "dash.yaml"), []byte(dashYAML), 0644))
 
 	for arch, triplet := range map[string]string{"amd64": "x86_64-linux-gnu", "arm64": "aarch64-linux-gnu"} {
 		all := filepath.Join(f.trees, arch, "bash_cov-all")
@@ -114,6 +132,8 @@ func setup(t *testing.T) *fixture {
 		touch(t, filepath.Join(f.trees, arch, "bash_cov-ignore-0/usr/share/man/man1/bash.1.gz"))
 		touch(t, filepath.Join(f.trees, arch, "bash_cov-ignore-1/usr/share/doc/bash/copyright"))
 		assert.NoError(t, os.WriteFile(filepath.Join(f.trees, arch, "bash.version"), []byte("5.2-1"), 0644))
+		touch(t, filepath.Join(f.trees, arch, "dash_cov-all/usr/bin/dash"))
+		touch(t, filepath.Join(f.trees, arch, "dash_bins/usr/bin/dash"))
 	}
 
 	bin := filepath.Join(tmp, "chisel")
@@ -126,6 +146,9 @@ func setup(t *testing.T) *fixture {
 	t.Setenv("FAKE_LOCKS", "")
 	t.Setenv("FAKE_FAIL", "")
 	t.Setenv("FAKE_NOCONTENT", "")
+	t.Setenv("FAKE_CACHE", "")
+	t.Setenv("FAKE_HOMES", filepath.Join(tmp, "homes"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "xdg"))
 	return f
 }
 
@@ -262,18 +285,20 @@ func TestRunLanesNeverOverlapAndLeadGoesFirst(t *testing.T) {
 	t.Setenv("FAKE_LOCKS", locks)
 	for _, arch := range []string{"ppc64el", "s390x", "riscv64"} {
 		assert.NoError(t, os.MkdirAll(filepath.Join(f.trees, arch, "bash_cov-all/usr/bin"), 0755))
+		assert.NoError(t, os.MkdirAll(filepath.Join(f.trees, arch, "dash_cov-all/usr/bin"), 0755))
 	}
 	arches := []string{"amd64", "arm64", "ppc64el", "s390x", "riscv64"}
-	res, err := Run(Options{Release: f.release, Arches: arches, Runner: f.runner}, []string{"bash", "bash"})
+	res, err := Run(Options{Release: f.release, Arches: arches, Runner: f.runner}, []string{"bash", "dash", "bash"})
 	assert.NoError(t, err)
+	assert.Len(t, res, 2)
 	for _, p := range res {
 		for _, a := range p.Arches {
 			assert.Nil(t, a.Err)
 		}
 	}
 	cuts := f.cuts(t)
-	// Two packages, three cuts each (cov-all, config, bins, copyright = 4; scripts not cut).
-	assert.Len(t, cuts, 2*4*len(arches))
+	// bash: cov-all, config, bins, copyright (scripts is not cut); dash: cov-all, bins.
+	assert.Len(t, cuts, (4+2)*len(arches))
 	lead := 0
 	for i, c := range cuts {
 		if strings.HasPrefix(c, "amd64 ") {
@@ -281,7 +306,53 @@ func TestRunLanesNeverOverlapAndLeadGoesFirst(t *testing.T) {
 			lead++
 		}
 	}
-	assert.Equal(t, lead, 2*4)
+	assert.Equal(t, lead, 4+2)
+}
+
+func TestRunJobsUseCacheViews(t *testing.T) {
+	f := setup(t)
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	touch(t, filepath.Join(shared, "sha256", "abc123"))
+	t.Setenv("FAKE_CACHE", "abc123")
+	var log strings.Builder
+	res, err := Run(Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Jobs: 2, Cache: shared, Runner: f.runner, Log: &log}, []string{"bash", "dash"})
+	assert.NoError(t, err)
+	assert.Equal(t, log.String(), "")
+	for _, p := range res {
+		for _, a := range p.Arches {
+			assert.Nil(t, a.Err)
+			assert.That(t, a.Available)
+		}
+	}
+	// Every cut ran in a view, never in the shared cache.
+	homes, err := os.ReadFile(os.Getenv("FAKE_HOMES"))
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(homes)), "\n")
+	assert.Len(t, lines, 2*(4+2))
+	base := filepath.Join(filepath.Dir(shared), "chisel-slice-coverage")
+	for _, h := range lines {
+		assert.That(t, strings.HasPrefix(h, base+string(filepath.Separator)+"view-"), h)
+	}
+	// Each distinct cut's blob was merged back, and no view is left behind.
+	blobs, err := os.ReadDir(filepath.Join(shared, "sha256"))
+	assert.NoError(t, err)
+	assert.Len(t, blobs, 1+2*(4+2))
+	views, err := os.ReadDir(base)
+	assert.NoError(t, err)
+	assert.Len(t, views, 0)
+}
+
+func TestRunJobsCapsConcurrentCuts(t *testing.T) {
+	f := setup(t)
+	locks := t.TempDir()
+	t.Setenv("FAKE_LOCKS", locks)
+	// One slot: cuts on one arch never overlap even with many packages.
+	res, err := Run(Options{Release: f.release, Arches: []string{"amd64"}, Jobs: 1, Runner: f.runner}, []string{"bash", "dash"})
+	assert.NoError(t, err)
+	for _, p := range res {
+		assert.Nil(t, p.Arches[0].Err)
+	}
+	assert.Len(t, f.cuts(t), 4+2)
 }
 
 // stamped matches the timestamp every line of the tool's own log starts with.
