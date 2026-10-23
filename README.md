@@ -53,7 +53,7 @@ chisel-slice-coverage [flags] <package>...
   -h, --help                   this text
 ```
 
-`--ignore` only ever shrinks the uncovered set; a covered path that matches an ignore stays covered. the exit code is 0 unless something failed (2), or `--fail-uncovered` is given and paths are left (1), which makes it usable as a ci gate. the report is coloured a little when stdout is a terminal; set `NO_COLOR` to turn that off, and piped output is always plain.
+`--ignore` only ever shrinks the uncovered set; a covered path that matches an ignore stays covered. the exit code is 0 unless something failed (2), `--fail-uncovered` is given and paths are left (1), or the run was interrupted (130), which makes it usable as a ci gate. the report is coloured a little when stdout is a terminal; set `NO_COLOR` to turn that off, and piped output is always plain.
 
 ## how it matches
 
