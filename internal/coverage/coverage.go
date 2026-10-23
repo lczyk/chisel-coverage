@@ -77,8 +77,13 @@ type run struct {
 	jobs     int             // cuts allowed to run at once
 	took     []time.Duration // per package, its lead arch's cut wall time
 	viewCost time.Duration   // of making and removing one view; 0 without a cache
+	start    time.Time
 	mu       sync.Mutex
+	seeding  sync.Mutex    // views are seeded one at a time, see worker
 	views    []*cache.View // idle views, for the next worker
+	cuts     int           // the totals of the run, for the summary line
+	paths    int
+	bytes    int64
 }
 
 // unit is one package on one architecture.
@@ -114,7 +119,7 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{opts: opts, jobs: jobs(opts.Jobs), took: make([]time.Duration, len(pkgs))}
+	r := &run{opts: opts, jobs: jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), start: time.Now()}
 	defer r.cleanup()
 	if r.jobs > 1 && opts.Cache != "" {
 		r.viewCost = cache.Cost(opts.Cache)
@@ -149,6 +154,8 @@ func Run(opts Options, pkgs []string) ([]Package, error) {
 	}
 	r.phase(lead)
 	r.phase(rest)
+	r.removeViews()
+	r.verbosef("%d cuts %d paths %.1fmb %.1fs", r.cuts, r.paths, float64(r.bytes)/1e6, time.Since(r.start).Seconds())
 	return r.results, nil
 }
 
@@ -334,11 +341,18 @@ func (r *run) worker(isolate bool) *worker {
 	}
 	r.mu.Unlock()
 	if w.view == nil {
+		// Linking into one directory serialises in the kernel anyway, so
+		// seeding views one at a time costs nothing overall and gets the
+		// first one out sooner.
+		r.seeding.Lock()
+		start := time.Now()
 		view, err := cache.New(r.opts.Cache)
+		r.seeding.Unlock()
 		if err != nil {
 			r.logf("cache view: %v; sharing chisel's cache instead", err)
 			return w
 		}
+		r.verbosef("cache view: %d blobs linked in %.1fs", view.Blobs(), time.Since(start).Seconds())
 		w.view = view
 	}
 	w.runner.CacheHome = w.view.Home
@@ -433,10 +447,23 @@ func (r *run) cutPackage(w *worker, p *prepared, arch string) Arch {
 	return a
 }
 
-func (r *run) cleanup() {
+// removeViews deletes the idle views, all at once since each is thousands of
+// unlinks.
+func (r *run) removeViews() {
+	var wg sync.WaitGroup
 	for _, v := range r.views {
-		_ = v.Remove()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = v.Remove()
+		}()
 	}
+	wg.Wait()
+	r.views = nil
+}
+
+func (r *run) cleanup() {
+	r.removeViews()
 	if r.opts.Keep {
 		return
 	}
@@ -448,10 +475,17 @@ func (r *run) cleanup() {
 	}
 }
 
-// cutf reports one finished cut on the Verbose writer as
+// cutf counts one finished cut and reports it on the Verbose writer as
 // "<arch> <slice> <paths> <seconds>s"; a package missing for the
 // architecture is "n/a", a glob matching nothing "0", a failure "error".
 func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Duration) {
+	r.mu.Lock()
+	r.cuts++
+	if res != nil {
+		r.paths += len(res.Paths)
+		r.bytes += res.Bytes
+	}
+	r.mu.Unlock()
 	if r.opts.Verbose == nil {
 		return
 	}
@@ -469,9 +503,17 @@ func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Dur
 	stampf(r.opts.Verbose, "%s %s %s %.1fs", arch, slice, what, took.Seconds())
 }
 
+// verbosef writes a line without an architecture or slice on the Verbose
+// writer.
+func (r *run) verbosef(format string, args ...any) {
+	if r.opts.Verbose != nil {
+		stampf(r.opts.Verbose, format, args...)
+	}
+}
+
 func (r *run) logf(format string, args ...any) {
 	if r.opts.Log != nil {
-		stampf(r.opts.Log, "- - "+format, args...)
+		stampf(r.opts.Log, format, args...)
 	}
 }
 

@@ -40,6 +40,7 @@ type Runner struct {
 // Result is a successful cut.
 type Result struct {
 	Paths   []string // sorted; "/" excluded; directories end in "/"
+	Bytes   int64    // of the regular files among them
 	Version string   // from chisel's Fetching line, "" when not seen
 	DebArch string   // "all" or the architecture, from the same line
 }
@@ -107,11 +108,11 @@ func (r *Runner) Cut(release, root, arch, slice string) (*Result, error) {
 		return nil, &Error{Args: append([]string{r.Bin}, args...), Output: out.String(), Err: err}
 	}
 
-	paths, err := Walk(root)
+	paths, bytes, err := Walk(root)
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Paths: paths}
+	res := &Result{Paths: paths, Bytes: bytes}
 	pkg, _, _ := strings.Cut(slice, "_")
 	for _, m := range fetching.FindAllStringSubmatch(out.String(), -1) {
 		if m[1] == pkg {
@@ -123,10 +124,11 @@ func (r *Runner) Cut(release, root, arch, slice string) (*Result, error) {
 }
 
 // Walk lists every entry under root as an absolute path, sorted, with
-// directories marked by a trailing slash. root itself is not listed. Symlinks
-// are entries, not followed.
-func Walk(root string) ([]string, error) {
+// directories marked by a trailing slash, and adds up the regular files'
+// sizes. root itself is not listed. Symlinks are entries, not followed.
+func Walk(root string) ([]string, int64, error) {
 	var paths []string
+	var bytes int64
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -141,20 +143,26 @@ func Walk(root string) ([]string, error) {
 		path := "/" + filepath.ToSlash(rel)
 		if d.IsDir() {
 			path += "/"
+		} else if d.Type().IsRegular() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			bytes += info.Size()
 		}
 		paths = append(paths, path)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sort.Strings(paths)
-	return paths, nil
+	return paths, bytes, nil
 }
 
-// Stamp is the timestamp every line the tool logs starts with. A logged line
-// is "<stamp> <arch> <slice> <text>", space-separated, with "-" standing in
-// for an architecture or slice the line has none of, so the columns are fixed.
+// Stamp is the timestamp every line the tool logs starts with. A cut's line
+// is "<stamp> <arch> <slice> <text>", space-separated; a line about the run
+// as a whole is "<stamp> <text>".
 func Stamp() string {
 	return time.Now().Format("06-01-02T15:04:05")
 }

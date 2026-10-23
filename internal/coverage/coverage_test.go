@@ -384,6 +384,7 @@ func TestRunVerbose(t *testing.T) {
 		"amd64 bash_bins 4",
 		"amd64 bash_copyright error",
 		"riscv64 bash_cov-all n/a",
+		"5 cuts 26 paths 0.0mb",
 	})
 }
 
@@ -400,8 +401,8 @@ func TestRunKeep(t *testing.T) {
 		assert.That(t, stamped.MatchString(l), l)
 		lines[i] = stamped.ReplaceAllString(l, "")
 	}
-	rel := strings.TrimPrefix(lines[0], "- - release for bash: ")
-	work := strings.TrimPrefix(lines[1], "- - rootfs dirs: ")
+	rel := strings.TrimPrefix(lines[0], "release for bash: ")
+	work := strings.TrimPrefix(lines[1], "rootfs dirs: ")
 	defer os.RemoveAll(rel)
 	defer os.RemoveAll(work)
 	_, err = os.Stat(filepath.Join(rel, "slices", "bash.yaml"))

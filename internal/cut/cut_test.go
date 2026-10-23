@@ -112,13 +112,14 @@ func TestWalk(t *testing.T) {
 	root := t.TempDir()
 	assert.NoError(t, os.MkdirAll(filepath.Join(root, "etc", "empty.d"), 0755))
 	assert.NoError(t, os.MkdirAll(filepath.Join(root, "usr", "lib"), 0755))
-	assert.NoError(t, os.WriteFile(filepath.Join(root, "usr", "lib", "a.so"), nil, 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(root, "usr", "lib", "a.so"), []byte("abc"), 0644))
 	assert.NoError(t, os.Symlink("usr/lib", filepath.Join(root, "lib")))
-	paths, err := Walk(root)
+	paths, bytes, err := Walk(root)
 	assert.NoError(t, err)
 	assert.EqualArrays(t, paths, []string{"/etc/", "/etc/empty.d/", "/lib", "/usr/", "/usr/lib/", "/usr/lib/a.so"})
+	assert.Equal(t, bytes, int64(3))
 
-	_, err = Walk(filepath.Join(root, "missing"))
+	_, _, err = Walk(filepath.Join(root, "missing"))
 	assert.Error(t, err, "no such file")
 }
 

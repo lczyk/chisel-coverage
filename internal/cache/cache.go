@@ -131,6 +131,9 @@ func (v *View) seed() error {
 	return first
 }
 
+// Blobs is how many blobs the view holds, seeded or merged.
+func (v *View) Blobs() int { return len(v.known) }
+
 // Merge publishes every blob the view gained since it was seeded or last
 // merged into the shared cache. A blob already there is left alone, which is
 // also how two views merging the same blob at once settle it.
