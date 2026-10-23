@@ -89,16 +89,8 @@ type run struct {
 	bytes    int64
 }
 
-// unit is one package on one architecture. A probe only checks that the
-// package exists there: an arch: all package cut on the lead architecture
-// has the same files everywhere it exists.
-type unit struct {
-	pi, ai int
-	probe  bool
-}
-
-// A probe is a cut with nothing to extract, about this long on a warm cache.
-const probeCost = time.Second
+// unit is one package on one architecture.
+type unit struct{ pi, ai int }
 
 // worker cuts one package at a time on one architecture with its own view of
 // chisel's cache, merged back after every package so the others gain the
@@ -154,18 +146,24 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 	}
 
 	// The lead architecture alone first, so the rest find the arch: all debs
-	// cached and the arch: all packages known, then every other architecture.
-	var lead, rest []unit
+	// cached and the arch: all packages known; then those packages are only
+	// probed on the other architectures, since an arch: all package has the
+	// same files everywhere it exists; then everything else.
+	var lead, probes, rest []unit
 	for pi := range r.prepared {
-		lead = append(lead, unit{pi: pi, ai: 0})
+		lead = append(lead, unit{pi, 0})
 	}
 	r.phase(lead)
 	for ai := 1; ai < len(opts.Arches); ai++ {
 		for pi := range r.prepared {
-			a := r.results[pi].Arches[0]
-			rest = append(rest, unit{pi: pi, ai: ai, probe: a.Available && a.Err == nil && a.DebArch == "all"})
+			if a := r.results[pi].Arches[0]; a.Available && a.Err == nil && a.DebArch == "all" {
+				probes = append(probes, unit{pi, ai})
+			} else {
+				rest = append(rest, unit{pi, ai})
+			}
 		}
 	}
+	r.probePhase(probes)
 	r.phase(rest)
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -313,11 +311,7 @@ func (r *run) phase(units []unit) {
 			for u := range next {
 				w.prepare(r.opts.Arches[u.ai], r.prepared[u.pi].def.Package)
 				start := time.Now()
-				if u.probe {
-					r.results[u.pi].Arches[u.ai] = r.probe(w, u)
-				} else {
-					r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
-				}
+				r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
 				if u.ai == 0 {
 					r.took[u.pi] = time.Since(start)
 				}
@@ -345,16 +339,55 @@ func (r *run) workers(units []unit) int {
 	n := min(r.jobs, len(units))
 	var work time.Duration
 	for _, u := range units {
-		if u.probe {
-			work += probeCost
-		} else {
-			work += r.took[u.pi]
-		}
+		work += r.took[u.pi]
 	}
 	if n <= 1 || r.viewCost == 0 || work == 0 {
 		return n
 	}
 	return min(n, 1+int(work/r.viewCost))
+}
+
+// probePhase runs the probes, one worker per architecture and no views:
+// the only blob two chisels can both miss is an architecture's Packages
+// index, and a worker's probes are all on one architecture, one after
+// another. The full cuts that follow then find every index cached.
+func (r *run) probePhase(units []unit) {
+	var byArch [][]unit
+	index := map[int]int{}
+	for _, u := range units {
+		i, ok := index[u.ai]
+		if !ok {
+			i = len(byArch)
+			index[u.ai] = i
+			byArch = append(byArch, nil)
+		}
+		byArch[i] = append(byArch[i], u)
+	}
+	n := min(r.jobs, len(byArch))
+	next := make(chan []unit)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := r.worker(false)
+			for group := range next {
+				for _, u := range group {
+					r.results[u.pi].Arches[u.ai] = r.probe(w, u)
+				}
+			}
+		}()
+	}
+groups:
+	for _, group := range byArch {
+		select {
+		case next <- group:
+		case <-r.ctx.Done():
+			break groups
+		}
+	}
+	close(next)
+	wg.Wait()
 }
 
 // worker makes a worker, isolated in a view of the cache when asked to and

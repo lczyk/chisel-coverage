@@ -26,7 +26,8 @@ import (
 // one arch are caught. With $FAKE_CACHE set it behaves like chisel's cache:
 // it fails unless blob $FAKE_CACHE is in $XDG_CACHE_HOME/chisel/sha256/, then
 // writes a blob named after the cut there and appends $XDG_CACHE_HOME to
-// $FAKE_HOMES. A <arch>/<pkg>.all marker makes the fetched deb an arch: all one.
+// $FAKE_HOMES as "<home> <arch> <slice>". A <arch>/<pkg>.all marker makes the
+// fetched deb an arch: all one.
 // $FAKE_SLEEP, when set, is slept before anything else.
 const fakeChisel = `#!/bin/sh
 while [ $# -gt 1 ]; do
@@ -49,7 +50,7 @@ if [ -n "$FAKE_CACHE" ]; then
   blobs="$XDG_CACHE_HOME/chisel/sha256"
   [ -f "$blobs/$FAKE_CACHE" ] || { echo "seed blob missing from $blobs" >&2; exit 1; }
   printf '%s %s' "$arch" "$slice" > "$blobs/$(printf '%s %s' "$arch" "$slice" | cksum | cut -d' ' -f1)"
-  printf '%s\n' "$XDG_CACHE_HOME" >> "$FAKE_HOMES"
+  printf '%s %s %s\n' "$XDG_CACHE_HOME" "$arch" "$slice" >> "$FAKE_HOMES"
 fi
 case " $FAKE_FAIL " in *" $slice "*) echo "boom" >&2; exit 1;; esac
 case " $FAKE_NOCONTENT " in *" $slice "*) echo "error: cannot extract from package \"$pkg\": no content at /nope/**" >&2; exit 1;; esac
@@ -342,7 +343,8 @@ func TestRunJobsUseCacheViews(t *testing.T) {
 	assert.Len(t, lines, 2*(4+2))
 	base := filepath.Join(filepath.Dir(shared), "chisel-slice-coverage")
 	inView := 0
-	for _, h := range lines {
+	for _, l := range lines {
+		h := strings.Fields(l)[0]
 		if h == os.Getenv("XDG_CACHE_HOME") {
 			continue
 		}
@@ -365,9 +367,23 @@ func TestRunArchAllPackagesAreProbed(t *testing.T) {
 		assert.NoError(t, os.WriteFile(filepath.Join(f.trees, arch, "dash.version"), []byte("0.5"), 0644))
 		touch(t, filepath.Join(f.trees, arch, "dash.all"))
 	}
-	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64", "riscv64"}, Runner: f.runner}, []string{"dash", "bash"})
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	touch(t, filepath.Join(shared, "sha256", "abc123"))
+	t.Setenv("FAKE_CACHE", "abc123")
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64", "riscv64"}, Jobs: 3, Cache: shared, Runner: f.runner}, []string{"dash", "bash"})
 	assert.NoError(t, err)
 	cuts := f.cuts(t)
+	// Probes run in the shared cache, never in a view.
+	homes, err := os.ReadFile(os.Getenv("FAKE_HOMES"))
+	assert.NoError(t, err)
+	probed := 0
+	for _, l := range strings.Split(strings.TrimSpace(string(homes)), "\n") {
+		if fields := strings.Fields(l); strings.HasSuffix(fields[2], "_cov-probe") {
+			assert.Equal(t, fields[0], os.Getenv("XDG_CACHE_HOME"))
+			probed++
+		}
+	}
+	assert.Equal(t, probed, 2)
 	// dash is cut in full on the lead arch only, probed on the rest; bash is
 	// cut in full on every arch it exists on.
 	assert.That(t, slices.Contains(cuts, "amd64 dash_cov-all"))
