@@ -10,8 +10,8 @@ github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zt
 github.com/klauspost/compress v1.18.0/go.mod h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ=
 github.com/lczyk/assert v0.7.2 h1:+7w4IavmzR0ZN7GG7H3qsc9JODQ/fUyQDF4zN6JIK8o=
 github.com/lczyk/assert v0.7.2/go.mod h1:6dn8HnYwswKK+rRHBSld1X9UmOS054WYBluYj7rQBi4=
-github.com/lczyk/chisel-proxy/pkg v0.4.0 h1:h7K9weuKJABut+s/toHsrblK8C0kn6f72HMnROomikM=
-github.com/lczyk/chisel-proxy/pkg v0.4.0/go.mod h1:5esePhJr8bz7c3r3szq7SE9P7nCb5tnhXwmWEbcPxyg=
+github.com/lczyk/chisel-proxy/pkg v0.5.0 h1:tdpSNN6N19jEvj7HNcsiLXqT1RMgoN8gPXuO6BVPVik=
+github.com/lczyk/chisel-proxy/pkg v0.5.0/go.mod h1:5esePhJr8bz7c3r3szq7SE9P7nCb5tnhXwmWEbcPxyg=
 github.com/lczyk/version/go v0.6.0 h1:baYQ63C2r6J27mMlu2p9P1zy15tQegko6fEPdnjrbyM=
 github.com/lczyk/version/go v0.6.0/go.mod h1:8CHgUp1ILDx0+yN/F53SM/QKRjVEXjt3Od4D4L0986Y=
 github.com/ulikunitz/xz v0.5.15 h1:9DNdB5s+SgV3bQ2ApL10xRc35ck0DuIX/isZvIk+ubY=

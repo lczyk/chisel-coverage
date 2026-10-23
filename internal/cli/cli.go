@@ -219,7 +219,7 @@ func resolveArches(given []string) ([]string, error) {
 	}
 	for _, a := range given {
 		if a == "all" {
-			for _, x := range coverage.AllArches {
+			for _, x := range deb.Arches() {
 				add(x)
 			}
 			continue

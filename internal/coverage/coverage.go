@@ -18,15 +18,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lczyk/chisel-proxy/pkg/deb"
 	temprelease "github.com/lczyk/chisel-proxy/pkg/temp-release"
 
 	"github.com/lczyk/chisel-coverage/internal/cache"
 	"github.com/lczyk/chisel-coverage/internal/cut"
 	"github.com/lczyk/chisel-coverage/internal/sdf"
 )
-
-// AllArches lists every architecture ubuntu builds for, in --arch all order.
-var AllArches = []string{"amd64", "arm64", "armhf", "i386", "ppc64el", "riscv64", "s390x"}
 
 // Options configures a run.
 type Options struct {
@@ -751,18 +749,6 @@ func stampf(w io.Writer, format string, args ...any) {
 	fmt.Fprintf(w, "%s "+format+"\n", append([]any{cut.Stamp()}, args...)...)
 }
 
-// The cpu part of each architecture's multiarch triplet, plus gcc's spelling
-// for i386, which it uses under /usr/lib/gcc.
-var cpus = map[string][]string{
-	"amd64":   {"x86_64"},
-	"arm64":   {"aarch64"},
-	"armhf":   {"arm"},
-	"i386":    {"i386", "i686"},
-	"ppc64el": {"powerpc64le"},
-	"riscv64": {"riscv64"},
-	"s390x":   {"s390x"},
-}
-
 var abi = regexp.MustCompile(`<arch>-linux-gnu[a-z0-9]*`)
 
 // Normalise rewrites what names the architecture in path, so paths from
@@ -772,10 +758,11 @@ var abi = regexp.MustCompile(`<arch>-linux-gnu[a-z0-9]*`)
 // and the architecture's own name becomes <arch> where it stands as a word,
 // as in java-21-openjdk-amd64 or README.Debian.armhf.gz.
 func Normalise(path, arch string) string {
-	if _, ok := cpus[arch]; !ok {
+	cpus := deb.CPUs(arch)
+	if cpus == nil {
 		return path
 	}
-	for _, cpu := range cpus[arch] {
+	for _, cpu := range cpus {
 		path = strings.ReplaceAll(path, cpu+"-linux-", "<arch>-linux-")
 	}
 	path = abi.ReplaceAllString(path, "<arch>-linux-<gnu>")
