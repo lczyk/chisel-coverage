@@ -51,18 +51,19 @@ everything in the `cov-all` rootfs counts, directories included. a directory is 
 
 ## scheduling
 
-chisel's cache (`$XDG_CACHE_HOME/chisel`) is content-addressed and shared across runs; the tool uses it as-is. one wrinkle: when two chisel processes miss on the same blob at once, both write to the same `<digest>.tmp` and one of them fails its digest check (`internal/cache/cache.go`, `Create` with a known digest). concurrent cuts must therefore never share a cold blob.
+chisel's cache (`$XDG_CACHE_HOME/chisel`) is content-addressed and shared across runs. one wrinkle: when two chisel processes miss on the same blob at once, both write to the same fixed `<digest>.tmp`, one of them loses its rename and the other may read a torn file (`internal/cache/cache.go`, `Create` with a known digest; canonical/chisel#340). concurrent cuts must therefore never share a cache they can both write to.
 
-- one lane per architecture. a lane runs its cuts one after another: for each package, `cov-all`, then each slice, then the ignore slices. nothing on one architecture ever races itself.
-- the lead lane (the first architecture given; the host's by default) runs to completion alone, then the remaining lanes run in parallel. the only blobs lanes can share are `arch: all` debs, and the lead lane has fetched those by the time the others start.
+- the work is one unit per (package, architecture). `-j n` runs `n` cuts at once, `-1` (the default) one per cpu, `1` one after another. a pool of `n` workers pulls units in order; each worker cuts a unit's slices one after another (`cov-all`, then each slice, then the ignore slices).
+- the lead architecture (the first given; the host's by default) runs to completion alone, then the rest. the only blobs two units can share are `arch: all` debs and the suite indexes, and the lead phase has fetched those by the time the others start.
+- when more than one worker runs, each gets a private view of the cache (`internal/cache`): a directory under `$XDG_CACHE_HOME/chisel-slice-coverage/` hard-linked to every blob of the shared cache, which chisel runs against through `XDG_CACHE_HOME`. a miss lands in the view only; after each package the new blobs are linked back into the shared cache, skipped when another worker got there first. views are reused across the two phases, removed at the end, and a view a crashed run left behind is swept after a day. seeding a view is one link per blob, a couple of seconds for a 15k-blob cache, done in parallel. a lone worker needs no view and gets none. if the view cannot be made (another filesystem, no write access) the worker shares the cache and says so on stderr.
 
-on a warm cache a cut is well under a second, so the lead lane costs seconds per package. `-j` is not needed yet.
+on a warm cache a cut is well under a second; on a flaky archive a stalled connection holds one worker, not the run.
 
 ## chisel
 
 - the binary is `$CHISEL`, else `chisel` on `PATH`. its full environment is passed through.
 - stdout and stderr of every cut are captured. a failed cut prints its command line and output and the run exits 2. `-v` logs one line per finished cut on stderr (`26-10-22T09:34:09 arm64 ucf_cov-all 32p 1.1s`; `n/a` for a package missing on the arch, `0p` for a glob matching nothing, `error`), as do the `--keep` notices; `-vv` also streams every cut's output as it happens, with chisel's own timestamp dropped. every logged line is `<yy-mm-ddThh:mm:ss> <arch> <slice> <text>`, space-separated, with `-` for an arch or slice the line has none of, so `cut -d' '` works on all of them.
-- `cannot find package "<package>" in archive` on the `cov-all` cut means the package is not built for that architecture. that is a result ("not available"), not an error, and the lane skips the package's other cuts.
+- `cannot find package "<package>" in archive` on the `cov-all` cut means the package is not built for that architecture. that is a result ("not available"), not an error, and the worker skips the package's other cuts.
 - the version comes from chisel's `Fetching pool/.../<name>_<version>_<arch>.deb...` log line of the `cov-all` cut: the pool filename, so no epoch, plus the deb architecture (`all` or the real one). if the line is missing the version is unknown and nothing fails.
 - `--ignore unmaintained --ignore unstable` is always passed, so an old or devel release still cuts. an older chisel without `--ignore` fails every cut with its own "unknown flag" message, which the tool surfaces unchanged.
 
@@ -84,6 +85,8 @@ chisel-slice-coverage [flags] <package>...
                                architecture
       --fail-uncovered         exit 1 when any architecture has uncovered paths
       --keep                   keep the temp releases and rootfs dirs
+  -j, --jobs=<n>               cuts to run at once; -1 for one per cpu
+                               (default: -1)
   -v, --verbose                one line per cut on stderr; twice also streams
                                chisel's output
       --version                print the version and exit
@@ -119,14 +122,15 @@ mirrors chisel-proxy: `cmd/`, `internal/{cli,sdf,cut,coverage}`, `version.go` + 
 
 - `internal/sdf` -- read an sdf, strip, synthesise.
 - `internal/cut` -- run one chisel cut, classify its failure, read the version line, walk a rootfs.
-- `internal/coverage` -- lanes, set arithmetic, normalisation and grouping.
+- `internal/cache` -- private views of chisel's cache for concurrent cuts.
+- `internal/coverage` -- the worker pool, set arithmetic, normalisation and grouping.
 - `internal/cli` -- flags, text and json rendering, exit codes.
 
 deps: `github.com/jessevdk/go-flags` (what chisel uses), `gopkg.in/yaml.v3`, `github.com/lczyk/chisel-proxy/pkg` (`temp-release`; `deb` and `apt` in tests), `github.com/lczyk/assert`, `github.com/lczyk/version/go`.
 
 ## testing
 
-- unit tests with a fake `chisel` script that populates `--root` from the slice name. one of them takes a per-architecture lock in the fake and fails if two cuts on one architecture overlap.
+- unit tests with a fake `chisel` script that populates `--root` from the slice name. one of them takes a per-architecture lock in the fake and fails if two cuts overlap with `-j 1`; another has the fake behave like chisel's cache and checks every cut ran in a view and every blob came back.
 - an integration test with the real `chisel` against an in-memory signed archive (`chisel-proxy/pkg/apt`) of handmade debs, reached through `http_proxy` and a throwaway `XDG_CACHE_HOME`. this pins the chisel assumptions above (globs coexisting in one sdf, implicit parents, the ignore slices, `no content`) offline. skipped when `chisel` is not found.
 - `e2e/` against the real archive and a real chisel-releases clone, behind `-tags e2e` and `CHISEL_SLICE_COVERAGE_E2E=1`.
 
@@ -135,12 +139,11 @@ deps: `github.com/jessevdk/go-flags` (what chisel uses), `gopkg.in/yaml.v3`, `gi
 the prototype grew three speedups shortly before this rewrite. none needs code here:
 
 - caching `Packages.gz` for six hours: chisel caches the decompressed index by the digest `InRelease` lists, which is a hit for as long as the index is unchanged. only `InRelease` itself (tens of kb per suite) is re-fetched per cut.
-- fetching an `arch: all` deb once per run: chisel's cache is content-addressed, so the second architecture is a hit. the lead lane exists to make that true on a cold cache.
+- fetching an `arch: all` deb once per run: chisel's cache is content-addressed, so the second architecture is a hit. the lead phase exists to make that true on a cold cache.
 - extracting debs in-process instead of `dpkg-deb`: chisel extracts.
 
 ## later, maybe
 
 - a `--real` mode cutting the slices against the untouched release, essentials and mutate included, for "what does a real cut produce" rather than "what does the sdf declare".
 - `--release <name>` fetching a release the way chisel does.
-- `-j` to cap lanes, once someone runs `--arch all` across many packages.
-- the chisel cache race is a one-line upstream fix (`os.CreateTemp(dir, digest+".tmp.*")`); with it, the lead-lane wait can go.
+- once canonical/chisel#340 lands, views are only a bandwidth saver and the lead phase can go.
