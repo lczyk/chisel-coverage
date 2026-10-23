@@ -93,9 +93,10 @@ type unit struct{ pi, ai int }
 // chisel's cache, merged back after every package so the others gain the
 // blobs.
 type worker struct {
-	r      *run
-	runner cut.Runner
-	view   *cache.View
+	r       *run
+	runner  cut.Runner
+	isolate bool // wants a view of the cache, made on its first unit
+	view    *cache.View
 }
 
 // Run cuts every package on every architecture and returns the results in
@@ -295,6 +296,7 @@ func (r *run) phase(units []unit) {
 			w := r.worker(i > 0)
 			defer w.close()
 			for u := range next {
+				w.prepare(r.opts.Arches[u.ai], r.prepared[u.pi].def.Package)
 				start := time.Now()
 				r.results[u.pi].Arches[u.ai] = r.cutPackage(w, r.prepared[u.pi], r.opts.Arches[u.ai])
 				if u.ai == 0 {
@@ -327,14 +329,21 @@ func (r *run) workers(units []unit) int {
 	return min(n, 1+int(work/r.viewCost))
 }
 
-// worker makes a worker, with a view of the cache when asked to isolate:
-// one an earlier worker left when there is one. Without a cache dir, or when
-// no view can be made, the worker shares chisel's cache as is.
+// worker makes a worker, isolated in a view of the cache when asked to and
+// there is a cache dir.
 func (r *run) worker(isolate bool) *worker {
-	w := &worker{r: r, runner: *r.opts.Runner}
-	if !isolate || r.opts.Cache == "" {
-		return w
+	return &worker{r: r, runner: *r.opts.Runner, isolate: isolate && r.opts.Cache != ""}
+}
+
+// prepare gives an isolated worker its view before its first unit, on arch
+// for pkg: one an earlier worker left when there is one, else a new one.
+// When no view can be made the worker shares chisel's cache as is.
+func (w *worker) prepare(arch, pkg string) {
+	if !w.isolate {
+		return
 	}
+	w.isolate = false
+	r := w.r
 	r.mu.Lock()
 	if n := len(r.views); n > 0 {
 		w.view, r.views = r.views[n-1], r.views[:n-1]
@@ -349,14 +358,13 @@ func (r *run) worker(isolate bool) *worker {
 		view, err := cache.New(r.opts.Cache)
 		r.seeding.Unlock()
 		if err != nil {
-			r.logf("cache view: %v; sharing chisel's cache instead", err)
-			return w
+			r.logf("%s %s cache view: %v; sharing chisel's cache instead", arch, pkg, err)
+			return
 		}
-		r.verbosef("cache view: %d blobs linked in %.1fs", view.Blobs(), time.Since(start).Seconds())
+		r.verbosef("%s %s cache view: %d blobs linked in %.1fs", arch, pkg, view.Blobs(), time.Since(start).Seconds())
 		w.view = view
 	}
 	w.runner.CacheHome = w.view.Home
-	return w
 }
 
 func (w *worker) cut(release, root, arch, slice string) (*cut.Result, error) {
@@ -503,8 +511,7 @@ func (r *run) cutf(arch, slice string, res *cut.Result, err error, took time.Dur
 	stampf(r.opts.Verbose, "%s %s %s %.1fs", arch, slice, what, took.Seconds())
 }
 
-// verbosef writes a line without an architecture or slice on the Verbose
-// writer.
+// verbosef writes a line on the Verbose writer.
 func (r *run) verbosef(format string, args ...any) {
 	if r.opts.Verbose != nil {
 		stampf(r.opts.Verbose, format, args...)
