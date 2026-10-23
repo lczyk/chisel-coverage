@@ -31,7 +31,9 @@ every entry of the deb counts, directories included; a directory is covered once
 
 ```
 chisel-slice-coverage [flags] <package>...
-      --release=<dir>          chisel-releases checkout (default: .)
+      --release=<dir|name>     chisel-releases checkout, or a release name
+                               like ubuntu-24.04 fetched from github and
+                               cached (default: .)
       --arch=<a>[,<a>...]      architectures to check; "all" for every one
                                (default: host)
       --slice=<s>[,<s>...]     only these slices, bare or <package>_<slice>

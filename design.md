@@ -14,7 +14,7 @@ the python prototype (`thething-2`) fetched debs itself and matched sdf globs wi
 
 for each package:
 
-1. read `<release>/chisel.yaml` verbatim and `<release>/slices/<package>.yaml`.
+1. read `<release>/chisel.yaml` verbatim and `<release>/slices/<package>.yaml`. `--release` is a checkout, or a release name like `ubuntu-24.04`: then the branch tarball is fetched from github the way chisel fetches it, into `~/.cache/chisel-slice-coverage/releases/<name>`, refreshed by etag on every run and served from the cache when github is unreachable.
 2. synthesise one sdf holding, for the same package:
     - `cov-all` with a single entry `/**` -- the whole deb.
     - every real slice, stripped (see below). with `--slice`, only those.
@@ -128,6 +128,7 @@ mirrors chisel-proxy: `cmd/`, `internal/{cli,sdf,cut,coverage}`, `version.go` + 
 - `internal/sdf` -- read an sdf, strip, synthesise.
 - `internal/cut` -- run one chisel cut, classify its failure, read the version line, walk a rootfs.
 - `internal/cache` -- private views of chisel's cache for concurrent cuts.
+- `internal/release` -- `--release` as a checkout or a release name fetched from github and cached.
 - `internal/coverage` -- the worker pool, set arithmetic, normalisation and grouping.
 - `internal/cli` -- flags, text and json rendering, exit codes.
 
@@ -150,5 +151,4 @@ the prototype grew three speedups shortly before this rewrite. none needs code h
 ## later, maybe
 
 - a `--real` mode cutting the slices against the untouched release, essentials and mutate included, for "what does a real cut produce" rather than "what does the sdf declare".
-- `--release <name>` fetching a release the way chisel does.
 - once canonical/chisel#340 lands, views are only a bandwidth saver and the lead phase can go.
