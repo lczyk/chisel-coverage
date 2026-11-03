@@ -321,6 +321,27 @@ func TestRunCutFailureIsPerArch(t *testing.T) {
 	}
 }
 
+func TestRunOptionalSDF(t *testing.T) {
+	f := setup(t)
+	touch(t, filepath.Join(f.trees, "amd64", "zsh_cov-all/usr/bin/zsh"))
+	touch(t, filepath.Join(f.trees, "amd64", "zsh_cov-ignore-0/usr/bin/zsh"))
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Ignores: []string{"/usr/bin/**"}, Whole: true, Optional: true, Runner: f.runner}, []string{"zsh", "bash"})
+	assert.NoError(t, err)
+	zsh := res[0]
+	assert.Len(t, zsh.Slices, 0)
+	assert.That(t, zsh.Arches[0].Available)
+	assert.EqualArrays(t, zsh.Arches[0].Slices[sdf.AllSlice], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
+	assert.EqualArrays(t, zsh.Arches[0].Slices["cov-ignore-0"], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
+	assert.Len(t, zsh.Arches[0].Slices, 2)
+	assert.EqualArrays(t, res[1].Slices, []string{"config", "bins", "copyright", "scripts"})
+	assert.That(t, slices.Contains(f.cuts(t), "amd64 zsh_cov-ignore-0"))
+
+	// A broken file is still an error, only a missing one is optional.
+	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "slices", "zsh.yaml"), []byte("package: nope\n"), 0644))
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Optional: true, Runner: f.runner}, []string{"zsh"})
+	assert.Error(t, err, `package is "nope"`)
+}
+
 func TestRunErrorsUpFront(t *testing.T) {
 	f := setup(t)
 	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, nil)

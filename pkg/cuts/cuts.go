@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,12 +34,15 @@ type Options struct {
 	Only    []string // --slice values, bare or <package>_<slice>; nil means all
 	Ignores []string
 	Whole   bool // cut the whole-deb slice too and lead with it; else the probe leads
-	Keep    bool
-	Jobs    int    // cuts running at once; 0 or 1 is one after another, -1 one per cpu
-	Cache   string // chisel's cache dir, for per-worker views; "" shares it as is
-	Runner  *cut.Runner
-	Log     io.Writer // notices (--keep, cache trouble); nil discards
-	Verbose io.Writer // one line per cut; nil discards
+	// Optional lets a package have no slice definition file: it is cut as if
+	// its file declared no slices, so only the whole-deb and ignore slices.
+	Optional bool
+	Keep     bool
+	Jobs     int    // cuts running at once; 0 or 1 is one after another, -1 one per cpu
+	Cache    string // chisel's cache dir, for per-worker views; "" shares it as is
+	Runner   *cut.Runner
+	Log      io.Writer // notices (--keep, cache trouble); nil discards
+	Verbose  io.Writer // one line per cut; nil discards
 	// Visit, when set, sees every cut that succeeded while its rootfs still
 	// exists. Workers call it concurrently.
 	Visit func(Cut)
@@ -281,6 +285,9 @@ func resolveOnly(only, pkgs []string) (map[string][]string, error) {
 
 func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, error) {
 	def, err := sdf.Read(r.opts.Release, pkg)
+	if errors.Is(err, fs.ErrNotExist) && r.opts.Optional {
+		def, err = &sdf.Definition{Package: pkg}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
