@@ -132,7 +132,7 @@ the library is `github.com/lczyk/chisel-coverage/pkg`, a module of its own tagge
 - `pkg/cut` -- run one chisel cut, classify its failure, read the version line, walk a rootfs.
 - `pkg/cache` -- private views of chisel's cache for concurrent cuts.
 - `pkg/release` -- `--release` as a checkout or a release name fetched by chisel and read from its cache.
-- `pkg/cuts` -- the worker pool: every slice of every package on every architecture, the lead and probe phases, the views, the worker sizing. a caller gets each slice's paths per architecture, and a `Visit` hook sees every cut while its rootfs still exists. with `Whole` the whole-deb slice is cut and leads; without it the empty probe leads, since chisel fetches the deb for an empty slice too and so still reports availability, version and deb architecture.
+- `pkg/cuts` -- the worker pool: every slice of every package on every architecture, the lead and probe phases, the views, the worker sizing. a caller gets each slice's paths per architecture, and a `Visit` hook sees every cut while its rootfs still exists. `Only` nil considers every slice, empty none. with `Optional` a package without a slice definition file is cut as if it declared no slices, so a deb can be listed before any sdf exists. with `Whole` the whole-deb slice is cut and leads; without it the empty probe leads, since chisel fetches the deb for an empty slice too and so still reports availability, version and deb architecture.
 - `pkg/fold` -- path normalisation and the folding of architectures on what they share, keyed by whatever the caller says must agree.
 
 the binary's own packages:

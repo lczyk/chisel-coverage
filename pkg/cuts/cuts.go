@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -30,15 +31,18 @@ import (
 type Options struct {
 	Release string
 	Arches  []string // the first is cut alone before the rest
-	Only    []string // --slice values, bare or <package>_<slice>; nil means all
+	Only    []string // --slice values, bare or <package>_<slice>; nil means all, empty means none
 	Ignores []string
 	Whole   bool // cut the whole-deb slice too and lead with it; else the probe leads
-	Keep    bool
-	Jobs    int    // cuts running at once; 0 or 1 is one after another, -1 one per cpu
-	Cache   string // chisel's cache dir, for per-worker views; "" shares it as is
-	Runner  *cut.Runner
-	Log     io.Writer // notices (--keep, cache trouble); nil discards
-	Verbose io.Writer // one line per cut; nil discards
+	// Optional lets a package have no slice definition file: it is cut as if
+	// its file declared no slices, so only the whole-deb and ignore slices.
+	Optional bool
+	Keep     bool
+	Jobs     int    // cuts running at once; 0 or 1 is one after another, -1 one per cpu
+	Cache    string // chisel's cache dir, for per-worker views; "" shares it as is
+	Runner   *cut.Runner
+	Log      io.Writer // notices (--keep, cache trouble); nil discards
+	Verbose  io.Writer // one line per cut; nil discards
 	// Visit, when set, sees every cut that succeeded while its rootfs still
 	// exists. Workers call it concurrently.
 	Visit func(Cut)
@@ -249,11 +253,12 @@ func unique(in []string) []string {
 }
 
 // resolveOnly maps each package to the slices --slice keeps for it. A package
-// absent from the map is unrestricted. A bare name applies to every package
-// that has it and must exist in at least one; a <package>_<slice> name must
-// name a listed package.
+// absent from the map is unrestricted; a nil only leaves every package so,
+// an empty one keeps no slice anywhere. A bare name applies to every
+// package that has it and must exist in at least one; a <package>_<slice>
+// name must name a listed package.
 func resolveOnly(only, pkgs []string) (map[string][]string, error) {
-	if len(only) == 0 {
+	if only == nil {
 		return nil, nil
 	}
 	listed := map[string]bool{}
@@ -281,6 +286,9 @@ func resolveOnly(only, pkgs []string) (map[string][]string, error) {
 
 func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, error) {
 	def, err := sdf.Read(r.opts.Release, pkg)
+	if errors.Is(err, fs.ErrNotExist) && r.opts.Optional {
+		def, err = &sdf.Definition{Package: pkg}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +306,7 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 		if keep == nil {
 			keep = []string{}
 		}
-		if len(keep) == 0 && !r.anyExists(only) {
+		if len(keep) == 0 && len(only) > 0 && !r.anyExists(only) {
 			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(only, ", "))
 		}
 	}
