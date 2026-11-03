@@ -12,14 +12,14 @@ import (
 	"syscall"
 
 	goflags "github.com/jessevdk/go-flags"
-	"github.com/lczyk/chisel-proxy/pkg/deb"
 	ver "github.com/lczyk/version/go"
 
 	chiselcoverage "github.com/lczyk/chisel-coverage"
-	"github.com/lczyk/chisel-coverage/internal/cache"
 	"github.com/lczyk/chisel-coverage/internal/coverage"
-	"github.com/lczyk/chisel-coverage/internal/cut"
-	"github.com/lczyk/chisel-coverage/internal/release"
+	"github.com/lczyk/chisel-coverage/pkg/cache"
+	"github.com/lczyk/chisel-coverage/pkg/cut"
+	"github.com/lczyk/chisel-coverage/pkg/cuts"
+	"github.com/lczyk/chisel-coverage/pkg/release"
 )
 
 // Main runs the CLI and returns a process exit code: 0 ran fine, 1 uncovered
@@ -53,7 +53,7 @@ func Main(args []string) int {
 		errf(fmt.Errorf("no packages given"))
 		return 2
 	}
-	arches, err := resolveArches(f.Arches)
+	arches, err := cuts.ResolveArches(f.Arches)
 	if err != nil {
 		errf(err)
 		return 2
@@ -83,7 +83,7 @@ func Main(args []string) int {
 		return 2
 	}
 
-	opts := coverage.Options{
+	opts := cuts.Options{
 		Release: dir,
 		Arches:  arches,
 		Only:    f.Slices,
@@ -197,39 +197,6 @@ func splitLists(vals []string) []string {
 		}
 	}
 	return out
-}
-
-// resolveArches expands "all", defaults to the host and keeps the order given,
-// first occurrence wins.
-func resolveArches(given []string) ([]string, error) {
-	if len(given) == 0 {
-		a, err := deb.InferArch()
-		if err != nil {
-			return nil, err
-		}
-		return []string{a}, nil
-	}
-	var out []string
-	seen := map[string]bool{}
-	add := func(a string) {
-		if !seen[a] {
-			seen[a] = true
-			out = append(out, a)
-		}
-	}
-	for _, a := range given {
-		if a == "all" {
-			for _, x := range deb.Arches() {
-				add(x)
-			}
-			continue
-		}
-		if !deb.ValidArch(a) {
-			return nil, fmt.Errorf("invalid architecture %q", a)
-		}
-		add(a)
-	}
-	return out, nil
 }
 
 // fileVersion returns the version line of a VERSION file: the first line that

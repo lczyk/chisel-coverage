@@ -11,6 +11,7 @@ import (
 
 	"github.com/lczyk/assert"
 
+	chiselcoverage "github.com/lczyk/chisel-coverage"
 	"github.com/lczyk/chisel-coverage/internal/coverage"
 )
 
@@ -63,19 +64,6 @@ func TestParseArgs(t *testing.T) {
 	f, _, err = parseArgs([]string{"bash", "--version"}, io.Discard)
 	assert.NoError(t, err)
 	assert.That(t, f.Version && !f.help)
-}
-
-func TestResolveArches(t *testing.T) {
-	host, err := resolveArches(nil)
-	assert.NoError(t, err)
-	assert.Len(t, host, 1)
-
-	all, err := resolveArches([]string{"s390x", "all", "amd64"})
-	assert.NoError(t, err)
-	assert.EqualArrays(t, all, []string{"s390x", "amd64", "arm64", "armhf", "i386", "ppc64el", "riscv64"})
-
-	_, err = resolveArches([]string{"x86"})
-	assert.Error(t, err, `invalid architecture "x86"`)
 }
 
 func sample() []coverage.Package {
@@ -324,9 +312,11 @@ func TestMainExitCodes(t *testing.T) {
 		assert.Equal(t, code, 2, args)
 	}
 
+	version := fileVersion(chiselcoverage.VersionFile)
+	assert.That(t, version != "")
 	code, out = captureStdout(t, func() int { return Main([]string{"version"}) })
 	assert.Equal(t, code, 0)
-	assert.ContainsString(t, out, "0.1.0")
+	assert.ContainsString(t, out, version)
 	for _, args := range [][]string{{"help"}, {"--help"}, {"--release", rel, "-h"}, {"demo", "--help"}} {
 		code, out = captureStdout(t, func() int { return Main(args) })
 		assert.Equal(t, code, 0, args)
@@ -334,7 +324,7 @@ func TestMainExitCodes(t *testing.T) {
 	}
 	code, out = captureStdout(t, func() int { return Main([]string{"--release", rel, "--version"}) })
 	assert.Equal(t, code, 0)
-	assert.ContainsString(t, out, "0.1.0")
+	assert.ContainsString(t, out, version)
 }
 
 func TestFileVersion(t *testing.T) {

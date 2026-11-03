@@ -52,7 +52,7 @@ everything in the `cov-all` rootfs counts, directories included. a directory is 
 
 ## scheduling
 
-chisel's cache (`$XDG_CACHE_HOME/chisel`) is content-addressed and shared across runs. one wrinkle: when two chisel processes miss on the same blob at once, both write to the same fixed `<digest>.tmp`, one of them loses its rename and the other may read a torn file (`internal/cache/cache.go`, `Create` with a known digest; canonical/chisel#340). concurrent cuts must therefore never share a cache they can both write to.
+chisel's cache (`$XDG_CACHE_HOME/chisel`) is content-addressed and shared across runs. one wrinkle: when two chisel processes miss on the same blob at once, both write to the same fixed `<digest>.tmp`, one of them loses its rename and the other may read a torn file (chisel's `internal/cache/cache.go`, `Create` with a known digest; canonical/chisel#340). concurrent cuts must therefore never share a cache they can both write to.
 
 - the work is one unit per (package, architecture, slice). `-j n` runs `n` cuts at once, `-1` (the default) one per cpu, `1` one after another. a pass over a set of (package, architecture) pairs starts with every pair's `cov-all` on a queue the workers feed themselves: when a `cov-all` finds the package, its worker queues the package's other slices, so a package missing on an architecture costs one cut, a big package's slices spread over all the workers, and nobody waits between the two. once a cut of a pair has failed its remaining slices are skipped.
 - an `arch: all` package (the lead cut fetched `<name>_<version>_all.deb`) is cut in full on the lead architecture only; on every other architecture `cov-probe` is cut instead, a second rather than a full extract, and the lead result stands in where the package exists (i386's partial archive, say, may lack it). if chisel's log line ever stops naming the deb, nothing is detected as `all` and every architecture is cut in full as before.
@@ -61,7 +61,7 @@ chisel's cache (`$XDG_CACHE_HOME/chisel`) is content-addressed and shared across
 - sigint or sigterm stops the run: no new cut starts, running chisels get sigint, the temp releases, rootfs dirs and cache views are removed, and the exit code is 130. a second signal ends the process at once, leaving whatever is left for the 24h sweep.
 - an `arch: all` package's architectures fold on their real paths, not normalised ones: it is one deb everywhere, and a go source tree names every architecture somewhere, so normalising would keep the architectures apart.
 - the lead architecture (the first given; the host's by default) runs to completion alone, then the rest. the only blobs two units can share are `arch: all` debs and the suite indexes, and the lead phase has fetched those by the time the others start.
-- when more than one worker runs, every worker but the first gets a private view of the cache (`internal/cache`): a directory under `$XDG_CACHE_HOME/chisel-coverage/` hard-linked to every blob of the shared cache, which chisel runs against through `XDG_CACHE_HOME`. a miss lands in the view only; after each cut the new blobs are linked back into the shared cache, skipped when another worker got there first. views are reused across the two phases, removed at the end, and a view a crashed run left behind is swept after a day. seeding a view is one link per blob, a couple of seconds for a 15k-blob cache over a few goroutines. views are seeded one at a time: the links serialise on the directory in the kernel anyway, so three at once take three times as long each, and one at a time gets the first worker going sooner. at the end the views are removed all at once, each being thousands of unlinks. the first worker of a phase shares the cache as is: a view's blobs only ever enter it as complete files linked into place, so nothing trips the chisel running beside them. a view of a big cache costs about as much as a few cuts, so a pass gets no more workers than pay off: the first worker and every view left in the pool are free, each further worker starts one seeding later than the one before (they are seeded in turn), and a worker is added only while the pass would end sooner with it. the work of a pass is its cuts times what the package's cuts took on the lead architecture so far, a second each before anything is measured. if the view cannot be made (another filesystem, no write access) the worker shares the cache and says so on stderr.
+- when more than one worker runs, every worker but the first gets a private view of the cache (`pkg/cache`): a directory under `$XDG_CACHE_HOME/chisel-coverage/` hard-linked to every blob of the shared cache, which chisel runs against through `XDG_CACHE_HOME`. a miss lands in the view only; after each cut the new blobs are linked back into the shared cache, skipped when another worker got there first. views are reused across the two phases, removed at the end, and a view a crashed run left behind is swept after a day. seeding a view is one link per blob, a couple of seconds for a 15k-blob cache over a few goroutines. views are seeded one at a time: the links serialise on the directory in the kernel anyway, so three at once take three times as long each, and one at a time gets the first worker going sooner. at the end the views are removed all at once, each being thousands of unlinks. the first worker of a phase shares the cache as is: a view's blobs only ever enter it as complete files linked into place, so nothing trips the chisel running beside them. a view of a big cache costs about as much as a few cuts, so a pass gets no more workers than pay off: the first worker and every view left in the pool are free, each further worker starts one seeding later than the one before (they are seeded in turn), and a worker is added only while the pass would end sooner with it. the work of a pass is its cuts times what the package's cuts took on the lead architecture so far, a second each before anything is measured. if the view cannot be made (another filesystem, no write access) the worker shares the cache and says so on stderr.
 
 on a warm cache a cut is well under a second; on a flaky archive a stalled connection holds one worker, not the run.
 
@@ -124,16 +124,23 @@ the text report is what is uncovered and nothing else: no indentation, no blank 
 
 ## layout
 
-mirrors chisel-proxy: `cmd/`, `internal/{cli,sdf,cut,coverage}`, `version.go` + `VERSION`, `e2e/`, lowercase `makefile`, agpl-3.
+mirrors chisel-proxy: `cmd/`, `internal/{cli,coverage}`, a library module under `pkg/`, `version.go` + `VERSION`, `e2e/`, lowercase `makefile`, agpl-3.
 
-- `internal/sdf` -- read an sdf, strip, synthesise.
-- `internal/cut` -- run one chisel cut, classify its failure, read the version line, walk a rootfs.
-- `internal/cache` -- private views of chisel's cache for concurrent cuts.
-- `internal/release` -- `--release` as a checkout or a release name fetched by chisel and read from its cache.
-- `internal/coverage` -- the worker pool, set arithmetic, normalisation and grouping.
+the library is `github.com/lczyk/chisel-coverage/pkg`, a module of its own tagged `pkg/vX.Y.Z`, so sister tools (chisel-file, chisel-elftree) drive chisel the same way without copying the pool:
+
+- `pkg/sdf` -- read an sdf, strip, synthesise.
+- `pkg/cut` -- run one chisel cut, classify its failure, read the version line, walk a rootfs.
+- `pkg/cache` -- private views of chisel's cache for concurrent cuts.
+- `pkg/release` -- `--release` as a checkout or a release name fetched by chisel and read from its cache.
+- `pkg/cuts` -- the worker pool: every slice of every package on every architecture, the lead and probe phases, the views, the worker sizing. a caller gets each slice's paths per architecture, and a `Visit` hook sees every cut while its rootfs still exists. with `Whole` the whole-deb slice is cut and leads; without it the empty probe leads, since chisel fetches the deb for an empty slice too and so still reports availability, version and deb architecture.
+- `pkg/fold` -- path normalisation and the folding of architectures on what they share, keyed by whatever the caller says must agree.
+
+the binary's own packages:
+
+- `internal/coverage` -- the set arithmetic over `pkg/cuts` results, and the report groups over `pkg/fold` with the path's state as what must agree.
 - `internal/cli` -- flags, text and json rendering, exit codes.
 
-deps: `github.com/jessevdk/go-flags` (what chisel uses), `gopkg.in/yaml.v3`, `github.com/lczyk/chisel-proxy/pkg` (`temp-release`; `deb` and `apt` in tests), `github.com/lczyk/assert`, `github.com/lczyk/version/go`.
+deps: `github.com/jessevdk/go-flags` (what chisel uses), `gopkg.in/yaml.v3`, `github.com/lczyk/chisel-proxy/pkg` (`temp-release`, `deb`; `apt` in tests), `github.com/lczyk/assert`, `github.com/lczyk/version/go`.
 
 ## testing
 

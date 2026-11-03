@@ -5,6 +5,7 @@
 ![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/lczyk/chisel-coverage)
 ![GitHub Tag](https://img.shields.io/github/v/tag/lczyk/chisel-coverage?filter=v*&sort=semver&label=release)
 [![Go Reference](https://pkg.go.dev/badge/github.com/lczyk/chisel-coverage.svg)](https://pkg.go.dev/github.com/lczyk/chisel-coverage)
+[![lint_and_test](https://github.com/lczyk/chisel-coverage/actions/workflows/lint_and_test.yml/badge.svg)](https://github.com/lczyk/chisel-coverage/actions/workflows/lint_and_test.yml)
 
 development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture.
 
@@ -51,6 +52,18 @@ you can add paths to `--ignore`. the syntax is identical to chisel's SDFs since 
 chisel does the work. for each package the tool writes a throwaway release holding `chisel.yaml` and a single slice definition (that's the `chisel-proxy` tech). the package's own slices are tehn stipped of from essentials, mutate scripts, `text` / `symlink` / `make` / `generate` entries etc, and `copy` entries are keyed by their source. extra slice (`cov-all`) with `/**` is also added to get the content of the entie deb, to compare. ignore globs are also extra slices. every slice is then `cut` to get the content of its rootffs.
 
 so archive selection, suites, priorities, pro archives, signatures, `arch:` lists and glob semantics are all whatever the particular chisel binary does. the cache is chisel's own too. 
+
+## library
+
+the building blocks are importable as `github.com/lczyk/chisel-coverage/pkg`, a module of its own:
+
+- `pkg/cuts` -- cut every slice of every package on every architecture, scheduled so concurrent chisels never share a writable cache, and get each rootfs listing back.
+- `pkg/sdf`, `pkg/cut`, `pkg/cache`, `pkg/release` -- the pieces it is made of: slice definitions stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, `--release` resolution.
+- `pkg/fold` -- normalise what names the architecture in a path, and fold architectures on what they share.
+
+```shell
+go get github.com/lczyk/chisel-coverage/pkg
+```
 
 ## build
 
