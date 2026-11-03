@@ -199,8 +199,8 @@ func TestRunCuts(t *testing.T) {
 	assert.Equal(t, amd64.Version, "5.2-1")
 	assert.Equal(t, amd64.DebArch, "amd64")
 	assert.Equal(t, amd64.StandIn, "")
-	assert.Len(t, amd64.Slices[sdf.AllSlice], 19)
-	assert.ContainsString(t, strings.Join(amd64.Slices[sdf.AllSlice], "\n"), "/usr/lib/x86_64-linux-gnu/bash/loadables.so")
+	assert.Len(t, amd64.Slices[sdf.DefaultPrefix.All()], 19)
+	assert.ContainsString(t, strings.Join(amd64.Slices[sdf.DefaultPrefix.All()], "\n"), "/usr/lib/x86_64-linux-gnu/bash/loadables.so")
 	assert.EqualArrays(t, amd64.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/bash", "/usr/bin/rbash"})
 	assert.EqualArrays(t, amd64.Slices["config"], []string{"/etc/", "/etc/skel/", "/etc/skel/.bashrc"})
 	// Cut, but the fake has no tree for it: empty.
@@ -212,7 +212,7 @@ func TestRunCuts(t *testing.T) {
 	// A glob matching nothing is an empty set, not a failure.
 	assert.EqualArrays(t, amd64.Slices["cov-ignore-2"], []string{})
 	assert.Len(t, amd64.Slices, 1+4+3)
-	_, probed := amd64.Slices[sdf.ProbeSlice]
+	_, probed := amd64.Slices[sdf.DefaultPrefix.Probe()]
 	assert.That(t, !probed)
 
 	i386 := p.Arches[1]
@@ -223,7 +223,7 @@ func TestRunCuts(t *testing.T) {
 
 	arm64 := p.Arches[2]
 	assert.That(t, arm64.Available)
-	assert.ContainsString(t, strings.Join(arm64.Slices[sdf.AllSlice], "\n"), "/usr/lib/aarch64-linux-gnu/bash/loadables.so")
+	assert.ContainsString(t, strings.Join(arm64.Slices[sdf.DefaultPrefix.All()], "\n"), "/usr/lib/aarch64-linux-gnu/bash/loadables.so")
 
 	cuts := f.cuts(t)
 	assert.That(t, !strings.Contains(strings.Join(cuts, "\n"), "bash_scripts"))
@@ -253,9 +253,9 @@ func TestRunProbeLeads(t *testing.T) {
 	assert.That(t, amd64.Available)
 	assert.Equal(t, amd64.Version, "5.2-1")
 	assert.Equal(t, amd64.DebArch, "amd64")
-	_, whole := amd64.Slices[sdf.AllSlice]
+	_, whole := amd64.Slices[sdf.DefaultPrefix.All()]
 	assert.That(t, !whole)
-	_, probed := amd64.Slices[sdf.ProbeSlice]
+	_, probed := amd64.Slices[sdf.DefaultPrefix.Probe()]
 	assert.That(t, !probed)
 	assert.Len(t, amd64.Slices, 4+1)
 	assert.EqualArrays(t, amd64.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/bash", "/usr/bin/rbash"})
@@ -337,7 +337,7 @@ func TestRunOptionalSDF(t *testing.T) {
 	zsh := res[0]
 	assert.Len(t, zsh.Slices, 0)
 	assert.That(t, zsh.Arches[0].Available)
-	assert.EqualArrays(t, zsh.Arches[0].Slices[sdf.AllSlice], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
+	assert.EqualArrays(t, zsh.Arches[0].Slices[sdf.DefaultPrefix.All()], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
 	assert.EqualArrays(t, zsh.Arches[0].Slices["cov-ignore-0"], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
 	assert.Len(t, zsh.Arches[0].Slices, 2)
 	assert.EqualArrays(t, res[1].Slices, []string{"config", "bins", "copyright", "scripts"})
@@ -347,6 +347,26 @@ func TestRunOptionalSDF(t *testing.T) {
 	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "slices", "zsh.yaml"), []byte("package: nope\n"), 0644))
 	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Optional: true, Runner: f.runner}, []string{"zsh"})
 	assert.Error(t, err, `package is "nope"`)
+}
+
+func TestRunPrefix(t *testing.T) {
+	f := setup(t)
+	for _, s := range []string{"bash_file-all", "bash_file-ignore-0"} {
+		assert.NoError(t, os.Rename(filepath.Join(f.trees, "amd64", strings.Replace(s, "file-", "cov-", 1)), filepath.Join(f.trees, "amd64", s)))
+	}
+	// The fake looks for <pkg>_cov-all to tell availability; keep one.
+	touch(t, filepath.Join(f.trees, "amd64", "bash_cov-all/x"))
+	var out strings.Builder
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Ignores: []string{"/usr/share/man/**"}, Whole: true, Prefix: "file", Runner: f.runner, Verbose: &out}, []string{"bash"})
+	assert.NoError(t, err)
+	a := res[0].Arches[0]
+	assert.That(t, a.Available)
+	assert.Len(t, a.Slices["file-all"], 19)
+	assert.Len(t, a.Slices["file-ignore-0"], 5)
+	_, cov := a.Slices["cov-all"]
+	assert.That(t, !cov)
+	assert.ContainsString(t, out.String(), "amd64 bash_file-all 19")
+	assert.That(t, !strings.Contains(out.String(), "cov-"))
 }
 
 func TestRunErrorsUpFront(t *testing.T) {
@@ -470,7 +490,7 @@ func TestRunArchAllPackagesAreProbed(t *testing.T) {
 	assert.Equal(t, dash.Arches[1].StandIn, "amd64")
 	assert.Equal(t, dash.Arches[0].StandIn, "")
 	assert.EqualArrays(t, dash.Arches[1].Slices["bins"], dash.Arches[0].Slices["bins"])
-	assert.EqualArrays(t, dash.Arches[1].Slices[sdf.AllSlice], dash.Arches[0].Slices[sdf.AllSlice])
+	assert.EqualArrays(t, dash.Arches[1].Slices[sdf.DefaultPrefix.All()], dash.Arches[0].Slices[sdf.DefaultPrefix.All()])
 	assert.That(t, !dash.Arches[2].Available)
 }
 

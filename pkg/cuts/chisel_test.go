@@ -112,7 +112,7 @@ slices:
 	assert.EqualArrays(t, demo.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/demo"})
 	assert.EqualArrays(t, demo.Slices["copyright"], []string{"/usr/", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/copyright"})
 	assert.EqualArrays(t, demo.Slices["scripts"], []string{})
-	assert.EqualArrays(t, demo.Slices[sdf.AllSlice], []string{"/usr/", "/usr/bin/", "/usr/bin/demo", "/usr/lib/", "/usr/lib/demo/", "/usr/lib/demo/plugin.so", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/README", "/usr/share/doc/demo/copyright"})
+	assert.EqualArrays(t, demo.Slices[sdf.DefaultPrefix.All()], []string{"/usr/", "/usr/bin/", "/usr/bin/demo", "/usr/lib/", "/usr/lib/demo/", "/usr/lib/demo/plugin.so", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/README", "/usr/share/doc/demo/copyright"})
 	assert.EqualArrays(t, demo.Slices["cov-ignore-0"], []string{"/usr/", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/README", "/usr/share/doc/demo/copyright"})
 	// A glob matching nothing in the package is an empty set.
 	assert.EqualArrays(t, demo.Slices["cov-ignore-1"], []string{})
