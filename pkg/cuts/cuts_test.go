@@ -295,6 +295,13 @@ func TestRunOnlySlices(t *testing.T) {
 	assert.EqualArrays(t, f.cuts(t), []string{"amd64 bash_cov-probe", "amd64 bash_bins"})
 	assert.Len(t, res[0].Arches[0].Slices, 1)
 
+	// An empty, non-nil Only keeps no slice: the lead and the ignores alone.
+	res, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{}, Ignores: []string{"/usr/share/man/**"}, Whole: true, Runner: f.runner}, []string{"bash"})
+	assert.NoError(t, err)
+	assert.EqualArrays(t, res[0].Slices, []string{})
+	assert.Len(t, res[0].Arches[0].Slices, 2)
+	assert.EqualArrays(t, f.cuts(t)[2:], []string{"amd64 bash_cov-all", "amd64 bash_cov-ignore-0"})
+
 	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"bash_nope"}, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, `bash has no slice "nope"`)
 	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"nope"}, Runner: f.runner}, []string{"bash"})

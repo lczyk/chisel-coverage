@@ -31,7 +31,7 @@ import (
 type Options struct {
 	Release string
 	Arches  []string // the first is cut alone before the rest
-	Only    []string // --slice values, bare or <package>_<slice>; nil means all
+	Only    []string // --slice values, bare or <package>_<slice>; nil means all, empty means none
 	Ignores []string
 	Whole   bool // cut the whole-deb slice too and lead with it; else the probe leads
 	// Optional lets a package have no slice definition file: it is cut as if
@@ -253,11 +253,12 @@ func unique(in []string) []string {
 }
 
 // resolveOnly maps each package to the slices --slice keeps for it. A package
-// absent from the map is unrestricted. A bare name applies to every package
-// that has it and must exist in at least one; a <package>_<slice> name must
-// name a listed package.
+// absent from the map is unrestricted; a nil only leaves every package so,
+// an empty one keeps no slice anywhere. A bare name applies to every
+// package that has it and must exist in at least one; a <package>_<slice>
+// name must name a listed package.
 func resolveOnly(only, pkgs []string) (map[string][]string, error) {
-	if len(only) == 0 {
+	if only == nil {
 		return nil, nil
 	}
 	listed := map[string]bool{}
@@ -305,7 +306,7 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 		if keep == nil {
 			keep = []string{}
 		}
-		if len(keep) == 0 && !r.anyExists(only) {
+		if len(keep) == 0 && len(only) > 0 && !r.anyExists(only) {
 			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(only, ", "))
 		}
 	}
