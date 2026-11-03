@@ -1,0 +1,554 @@
+package cuts
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/lczyk/assert"
+
+	"github.com/lczyk/chisel-coverage/pkg/cache"
+	"github.com/lczyk/chisel-coverage/pkg/cut"
+	"github.com/lczyk/chisel-coverage/pkg/sdf"
+)
+
+// fakeChisel fills --root from $FAKE_TREES/<arch>/<slice>/. A package with no
+// <arch>/<pkg>_cov-all tree is not available on that arch; a slice listed in
+// $FAKE_FAIL fails; a slice listed in $FAKE_NOCONTENT fails the way chisel
+// fails a glob matching nothing; a <arch>/<pkg>.version file is logged the way
+// chisel logs a fetch. Every cut appends "<arch> <slice>" to $FAKE_LOG and, with
+// $FAKE_LOCKS set, holds a per-arch lock for a moment so overlapping cuts on
+// one arch are caught. With $FAKE_CACHE set it behaves like chisel's cache:
+// it fails unless blob $FAKE_CACHE is in $XDG_CACHE_HOME/chisel/sha256/, then
+// writes a blob named after the cut there and appends $XDG_CACHE_HOME to
+// $FAKE_HOMES as "<home> <arch> <slice>". A <arch>/<pkg>.all marker makes the
+// fetched deb an arch: all one.
+// $FAKE_SLEEP, when set, is slept before anything else.
+const fakeChisel = `#!/bin/sh
+while [ $# -gt 1 ]; do
+  case "$1" in
+    --root) root="$2"; shift 2;;
+    --arch) arch="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+slice="$1"
+pkg="${slice%%_*}"
+[ -n "$FAKE_LOG" ] && printf '%s %s\n' "$arch" "$slice" >> "$FAKE_LOG"
+[ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
+if [ -n "$FAKE_LOCKS" ]; then
+  mkdir "$FAKE_LOCKS/$arch" 2>/dev/null || { echo "overlapping cut on $arch" >&2; exit 1; }
+  sleep 0.05
+  rmdir "$FAKE_LOCKS/$arch"
+fi
+if [ -n "$FAKE_CACHE" ]; then
+  blobs="$XDG_CACHE_HOME/chisel/sha256"
+  [ -f "$blobs/$FAKE_CACHE" ] || { echo "seed blob missing from $blobs" >&2; exit 1; }
+  printf '%s %s' "$arch" "$slice" > "$blobs/$(printf '%s %s' "$arch" "$slice" | cksum | cut -d' ' -f1)"
+  printf '%s %s %s\n' "$XDG_CACHE_HOME" "$arch" "$slice" >> "$FAKE_HOMES"
+fi
+case " $FAKE_FAIL " in *" $slice "*) echo "boom" >&2; exit 1;; esac
+case " $FAKE_NOCONTENT " in *" $slice "*) echo "error: cannot extract from package \"$pkg\": no content at /nope/**" >&2; exit 1;; esac
+if [ ! -d "$FAKE_TREES/$arch/${pkg}_cov-all" ]; then
+  echo "error: cannot find package \"$pkg\" in archive(s)" >&2
+  exit 1
+fi
+if [ -f "$FAKE_TREES/$arch/$pkg.version" ]; then
+  debarch=$arch
+  [ -f "$FAKE_TREES/$arch/$pkg.all" ] && debarch=all
+  echo "Fetching pool/main/x/$pkg/${pkg}_$(cat "$FAKE_TREES/$arch/$pkg.version")_$debarch.deb..." >&2
+fi
+tree="$FAKE_TREES/$arch/$slice"
+if [ -d "$tree" ]; then cp -R "$tree/." "$root/"; fi
+exit 0
+`
+
+const bashYAML = `package: bash
+
+essential:
+  - bash_copyright
+
+slices:
+  config:
+    contents:
+      /etc/skel/.bashrc:
+  bins:
+    essential:
+      - bash_config
+    contents:
+      /usr/bin/bash:
+      /usr/bin/rbash:
+  copyright:
+    contents:
+      /usr/share/doc/bash/copyright:
+  scripts:
+    mutate: |
+      pass
+`
+
+const dashYAML = `package: dash
+
+slices:
+  bins:
+    contents:
+      /usr/bin/dash:
+`
+
+type fixture struct {
+	tmp     string // $TMPDIR for the run, so leftovers are visible
+	release string
+	trees   string
+	log     string
+	runner  *cut.Runner
+}
+
+func touch(t *testing.T, p string) {
+	t.Helper()
+	assert.NoError(t, os.MkdirAll(filepath.Dir(p), 0755))
+	assert.NoError(t, os.WriteFile(p, []byte("x"), 0644))
+}
+
+func setup(t *testing.T) *fixture {
+	t.Helper()
+	tmp := t.TempDir()
+	f := &fixture{
+		tmp:     filepath.Join(tmp, "tmpdir"),
+		release: filepath.Join(tmp, "release"),
+		trees:   filepath.Join(tmp, "trees"),
+		log:     filepath.Join(tmp, "log"),
+	}
+	assert.NoError(t, os.MkdirAll(filepath.Join(f.release, "slices"), 0755))
+	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "chisel.yaml"), []byte("format: v1\n"), 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "slices", "bash.yaml"), []byte(bashYAML), 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "slices", "dash.yaml"), []byte(dashYAML), 0644))
+
+	for arch, triplet := range map[string]string{"amd64": "x86_64-linux-gnu", "arm64": "aarch64-linux-gnu"} {
+		all := filepath.Join(f.trees, arch, "bash_cov-all")
+		touch(t, filepath.Join(all, "usr/bin/bash"))
+		touch(t, filepath.Join(all, "usr/bin/rbash"))
+		touch(t, filepath.Join(all, "usr/lib", triplet, "bash/loadables.so"))
+		touch(t, filepath.Join(all, "usr/share/man/man1/bash.1.gz"))
+		touch(t, filepath.Join(all, "usr/share/doc/bash/copyright"))
+		touch(t, filepath.Join(all, "etc/skel/.bashrc"))
+		assert.NoError(t, os.MkdirAll(filepath.Join(all, "etc/foo.d"), 0755))
+		touch(t, filepath.Join(f.trees, arch, "bash_bins/usr/bin/bash"))
+		touch(t, filepath.Join(f.trees, arch, "bash_bins/usr/bin/rbash"))
+		touch(t, filepath.Join(f.trees, arch, "bash_config/etc/skel/.bashrc"))
+		touch(t, filepath.Join(f.trees, arch, "bash_cov-ignore-0/usr/share/man/man1/bash.1.gz"))
+		touch(t, filepath.Join(f.trees, arch, "bash_cov-ignore-1/usr/share/doc/bash/copyright"))
+		assert.NoError(t, os.WriteFile(filepath.Join(f.trees, arch, "bash.version"), []byte("5.2-1"), 0644))
+		touch(t, filepath.Join(f.trees, arch, "dash_cov-all/usr/bin/dash"))
+		touch(t, filepath.Join(f.trees, arch, "dash_bins/usr/bin/dash"))
+	}
+
+	bin := filepath.Join(tmp, "chisel")
+	assert.NoError(t, os.WriteFile(bin, []byte(fakeChisel), 0755))
+	f.runner = &cut.Runner{Bin: bin}
+	assert.NoError(t, os.MkdirAll(f.tmp, 0755))
+	t.Setenv("TMPDIR", f.tmp)
+	t.Setenv("FAKE_TREES", f.trees)
+	t.Setenv("FAKE_LOG", f.log)
+	t.Setenv("FAKE_LOCKS", "")
+	t.Setenv("FAKE_SLEEP", "")
+	t.Setenv("FAKE_FAIL", "")
+	t.Setenv("FAKE_NOCONTENT", "")
+	t.Setenv("FAKE_CACHE", "")
+	t.Setenv("FAKE_HOMES", filepath.Join(tmp, "homes"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "xdg"))
+	return f
+}
+
+func (f *fixture) cuts(t *testing.T) []string {
+	t.Helper()
+	b, err := os.ReadFile(f.log)
+	assert.NoError(t, err)
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+func TestRunCuts(t *testing.T) {
+	f := setup(t)
+	// The third ignore matches nothing, which chisel reports as a failed cut.
+	t.Setenv("FAKE_NOCONTENT", "bash_cov-ignore-2")
+	res, err := Run(context.Background(), Options{
+		Release: f.release,
+		Arches:  []string{"amd64", "i386", "arm64"},
+		Ignores: []string{"/usr/share/man/**", "/usr/share/doc/**", "/nope/**"},
+		Whole:   true,
+		Runner:  f.runner,
+	}, []string{"bash"})
+	assert.NoError(t, err)
+	assert.Len(t, res, 1)
+	p := res[0]
+	assert.Equal(t, p.Name, "bash")
+	assert.EqualArrays(t, p.Slices, []string{"config", "bins", "copyright", "scripts"})
+	assert.Len(t, p.Arches, 3)
+
+	amd64 := p.Arches[0]
+	assert.Equal(t, amd64.Arch, "amd64")
+	assert.That(t, amd64.Available)
+	assert.Nil(t, amd64.Err)
+	assert.Equal(t, amd64.Version, "5.2-1")
+	assert.Equal(t, amd64.DebArch, "amd64")
+	assert.Equal(t, amd64.StandIn, "")
+	assert.Len(t, amd64.Slices[sdf.AllSlice], 19)
+	assert.ContainsString(t, strings.Join(amd64.Slices[sdf.AllSlice], "\n"), "/usr/lib/x86_64-linux-gnu/bash/loadables.so")
+	assert.EqualArrays(t, amd64.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/bash", "/usr/bin/rbash"})
+	assert.EqualArrays(t, amd64.Slices["config"], []string{"/etc/", "/etc/skel/", "/etc/skel/.bashrc"})
+	// Cut, but the fake has no tree for it: empty.
+	assert.EqualArrays(t, amd64.Slices["copyright"], []string{})
+	// Nothing left after stripping: not cut at all, still listed.
+	assert.EqualArrays(t, amd64.Slices["scripts"], []string{})
+	assert.EqualArrays(t, amd64.Slices["cov-ignore-0"], []string{"/usr/", "/usr/share/", "/usr/share/man/", "/usr/share/man/man1/", "/usr/share/man/man1/bash.1.gz"})
+	assert.Len(t, amd64.Slices["cov-ignore-1"], 5)
+	// A glob matching nothing is an empty set, not a failure.
+	assert.EqualArrays(t, amd64.Slices["cov-ignore-2"], []string{})
+	assert.Len(t, amd64.Slices, 1+4+3)
+	_, probed := amd64.Slices[sdf.ProbeSlice]
+	assert.That(t, !probed)
+
+	i386 := p.Arches[1]
+	assert.Equal(t, i386.Arch, "i386")
+	assert.That(t, !i386.Available)
+	assert.Nil(t, i386.Err)
+	assert.Nil(t, i386.Slices)
+
+	arm64 := p.Arches[2]
+	assert.That(t, arm64.Available)
+	assert.ContainsString(t, strings.Join(arm64.Slices[sdf.AllSlice], "\n"), "/usr/lib/aarch64-linux-gnu/bash/loadables.so")
+
+	cuts := f.cuts(t)
+	assert.That(t, !strings.Contains(strings.Join(cuts, "\n"), "bash_scripts"))
+	assert.Equal(t, cuts[0], "amd64 bash_cov-all")
+	assert.Equal(t, cuts[4], "amd64 bash_cov-ignore-0")
+	assert.Equal(t, cuts[6], "amd64 bash_cov-ignore-2")
+	// i386 stops after cov-all.
+	n := 0
+	for _, c := range cuts {
+		if strings.HasPrefix(c, "i386 ") {
+			n++
+		}
+	}
+	assert.Equal(t, n, 1)
+
+	// Everything temporary is gone.
+	left, err := os.ReadDir(f.tmp)
+	assert.NoError(t, err)
+	assert.Len(t, left, 0)
+}
+
+func TestRunProbeLeads(t *testing.T) {
+	f := setup(t)
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "i386"}, Ignores: []string{"/usr/share/man/**"}, Runner: f.runner}, []string{"bash"})
+	assert.NoError(t, err)
+	amd64 := res[0].Arches[0]
+	assert.That(t, amd64.Available)
+	assert.Equal(t, amd64.Version, "5.2-1")
+	assert.Equal(t, amd64.DebArch, "amd64")
+	_, whole := amd64.Slices[sdf.AllSlice]
+	assert.That(t, !whole)
+	_, probed := amd64.Slices[sdf.ProbeSlice]
+	assert.That(t, !probed)
+	assert.Len(t, amd64.Slices, 4+1)
+	assert.EqualArrays(t, amd64.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/bash", "/usr/bin/rbash"})
+	assert.That(t, !res[0].Arches[1].Available)
+	cuts := f.cuts(t)
+	assert.Equal(t, cuts[0], "amd64 bash_cov-probe")
+	assert.EqualArrays(t, cuts[1:], []string{"amd64 bash_config", "amd64 bash_bins", "amd64 bash_copyright", "amd64 bash_cov-ignore-0", "i386 bash_cov-probe"})
+}
+
+func TestRunVisit(t *testing.T) {
+	f := setup(t)
+	var mu sync.Mutex
+	var seen []string
+	visit := func(c Cut) {
+		// The rootfs is still there, and lists what the result says.
+		paths, _, err := cut.Walk(c.Root)
+		assert.NoError(t, err)
+		assert.EqualArrays(t, paths, c.Result.Paths)
+		mu.Lock()
+		seen = append(seen, c.Package+" "+c.Arch+" "+c.Slice)
+		mu.Unlock()
+	}
+	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "i386"}, Ignores: []string{"/usr/share/man/**"}, Whole: true, Jobs: 3, Runner: f.runner, Visit: visit}, []string{"bash", "dash"})
+	assert.NoError(t, err)
+	sort.Strings(seen)
+	assert.EqualArrays(t, seen, []string{
+		"bash amd64 bins", "bash amd64 config", "bash amd64 copyright", "bash amd64 cov-all", "bash amd64 cov-ignore-0",
+		"dash amd64 bins", "dash amd64 cov-all", "dash amd64 cov-ignore-0",
+	})
+}
+
+func TestRunOnlySlices(t *testing.T) {
+	f := setup(t)
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"bins"}, Runner: f.runner}, []string{"bash"})
+	assert.NoError(t, err)
+	assert.EqualArrays(t, res[0].Slices, []string{"bins"})
+	assert.EqualArrays(t, f.cuts(t), []string{"amd64 bash_cov-probe", "amd64 bash_bins"})
+	assert.Len(t, res[0].Arches[0].Slices, 1)
+
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"bash_nope"}, Runner: f.runner}, []string{"bash"})
+	assert.Error(t, err, `bash has no slice "nope"`)
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"nope"}, Runner: f.runner}, []string{"bash"})
+	assert.Error(t, err, "no package being checked has a slice named nope")
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"zsh_bins"}, Runner: f.runner}, []string{"bash"})
+	assert.Error(t, err, "package zsh is not being checked")
+}
+
+func TestRunCutFailureIsPerArch(t *testing.T) {
+	f := setup(t)
+	// A real slice's path matching nothing is a failure, not an empty set.
+	t.Setenv("FAKE_NOCONTENT", "bash_config")
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, []string{"bash"})
+	assert.NoError(t, err)
+	assert.Error(t, res[0].Arches[0].Err, "no content at /nope/**")
+
+	t.Setenv("FAKE_NOCONTENT", "")
+	t.Setenv("FAKE_FAIL", "bash_config")
+	res, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Runner: f.runner}, []string{"bash"})
+	assert.NoError(t, err)
+	for _, a := range res[0].Arches {
+		assert.Error(t, a.Err, "bash_config: exit status 1\n  boom")
+		assert.That(t, !a.Available)
+	}
+}
+
+func TestRunErrorsUpFront(t *testing.T) {
+	f := setup(t)
+	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, nil)
+	assert.Error(t, err, "no packages")
+	_, err = Run(context.Background(), Options{Release: f.release, Runner: f.runner}, []string{"bash"})
+	assert.Error(t, err, "no architectures")
+	_, err = Run(context.Background(), Options{Release: t.TempDir(), Arches: []string{"amd64"}, Runner: f.runner}, []string{"bash"})
+	assert.Error(t, err, "not a chisel release")
+	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Runner: f.runner}, []string{"zsh"})
+	assert.Error(t, err, "zsh.yaml")
+}
+
+func TestRunLanesNeverOverlapAndLeadGoesFirst(t *testing.T) {
+	f := setup(t)
+	locks := t.TempDir()
+	t.Setenv("FAKE_LOCKS", locks)
+	for _, arch := range []string{"ppc64el", "s390x", "riscv64"} {
+		assert.NoError(t, os.MkdirAll(filepath.Join(f.trees, arch, "bash_cov-all/usr/bin"), 0755))
+		assert.NoError(t, os.MkdirAll(filepath.Join(f.trees, arch, "dash_cov-all/usr/bin"), 0755))
+	}
+	arches := []string{"amd64", "arm64", "ppc64el", "s390x", "riscv64"}
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: arches, Whole: true, Runner: f.runner}, []string{"bash", "dash", "bash"})
+	assert.NoError(t, err)
+	assert.Len(t, res, 2)
+	for _, p := range res {
+		for _, a := range p.Arches {
+			assert.Nil(t, a.Err)
+		}
+	}
+	cuts := f.cuts(t)
+	// bash: cov-all, config, bins, copyright (scripts is not cut); dash: cov-all, bins.
+	assert.Len(t, cuts, (4+2)*len(arches))
+	lead := 0
+	for i, c := range cuts {
+		if strings.HasPrefix(c, "amd64 ") {
+			assert.Equal(t, i, lead)
+			lead++
+		}
+	}
+	assert.Equal(t, lead, 4+2)
+}
+
+func TestRunJobsUseCacheViews(t *testing.T) {
+	f := setup(t)
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	touch(t, filepath.Join(shared, "sha256", "abc123"))
+	t.Setenv("FAKE_CACHE", "abc123")
+	var log strings.Builder
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Jobs: 2, Cache: shared, Whole: true, Runner: f.runner, Log: &log}, []string{"bash", "dash"})
+	assert.NoError(t, err)
+	assert.Equal(t, log.String(), "")
+	for _, p := range res {
+		for _, a := range p.Arches {
+			assert.Nil(t, a.Err)
+			assert.That(t, a.Available)
+		}
+	}
+	// The first worker cuts in the shared cache, the second in a view; each
+	// phase has one unit for each.
+	homes, err := os.ReadFile(os.Getenv("FAKE_HOMES"))
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(homes)), "\n")
+	assert.Len(t, lines, 2*(4+2))
+	base := filepath.Join(filepath.Dir(shared), "chisel-coverage")
+	inView := 0
+	for _, l := range lines {
+		h := strings.Fields(l)[0]
+		if h == os.Getenv("XDG_CACHE_HOME") {
+			continue
+		}
+		assert.That(t, strings.HasPrefix(h, base+string(filepath.Separator)+"view-"), h)
+		inView++
+	}
+	assert.That(t, inView > 0 && inView < len(lines), strconv.Itoa(inView))
+	// Each distinct cut's blob was merged back, and no view is left behind.
+	blobs, err := os.ReadDir(filepath.Join(shared, "sha256"))
+	assert.NoError(t, err)
+	assert.Len(t, blobs, 1+2*(4+2))
+	views, err := os.ReadDir(base)
+	assert.NoError(t, err)
+	assert.Len(t, views, 0)
+}
+
+func TestRunArchAllPackagesAreProbed(t *testing.T) {
+	f := setup(t)
+	for _, arch := range []string{"amd64", "arm64"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(f.trees, arch, "dash.version"), []byte("0.5"), 0644))
+		touch(t, filepath.Join(f.trees, arch, "dash.all"))
+	}
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	touch(t, filepath.Join(shared, "sha256", "abc123"))
+	t.Setenv("FAKE_CACHE", "abc123")
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64", "riscv64"}, Jobs: 3, Cache: shared, Whole: true, Runner: f.runner}, []string{"dash", "bash"})
+	assert.NoError(t, err)
+	cuts := f.cuts(t)
+	// Probes run in the shared cache, never in a view.
+	homes, err := os.ReadFile(os.Getenv("FAKE_HOMES"))
+	assert.NoError(t, err)
+	probed := 0
+	for _, l := range strings.Split(strings.TrimSpace(string(homes)), "\n") {
+		if fields := strings.Fields(l); strings.HasSuffix(fields[2], "_cov-probe") {
+			assert.Equal(t, fields[0], os.Getenv("XDG_CACHE_HOME"))
+			probed++
+		}
+	}
+	assert.Equal(t, probed, 2)
+	// dash is cut in full on the lead arch only, probed on the rest; bash is
+	// cut in full on every arch it exists on.
+	assert.That(t, slices.Contains(cuts, "amd64 dash_cov-all"))
+	assert.That(t, slices.Contains(cuts, "arm64 dash_cov-probe"))
+	assert.That(t, slices.Contains(cuts, "riscv64 dash_cov-probe"))
+	assert.That(t, !slices.Contains(cuts, "arm64 dash_cov-all"))
+	assert.That(t, slices.Contains(cuts, "arm64 bash_cov-all"))
+	dash := res[0]
+	assert.Equal(t, dash.Arches[0].DebArch, "all")
+	assert.That(t, dash.Arches[1].Available)
+	assert.Equal(t, dash.Arches[1].Arch, "arm64")
+	assert.Equal(t, dash.Arches[1].Version, "0.5")
+	assert.Equal(t, dash.Arches[1].StandIn, "amd64")
+	assert.Equal(t, dash.Arches[0].StandIn, "")
+	assert.EqualArrays(t, dash.Arches[1].Slices["bins"], dash.Arches[0].Slices["bins"])
+	assert.EqualArrays(t, dash.Arches[1].Slices[sdf.AllSlice], dash.Arches[0].Slices[sdf.AllSlice])
+	assert.That(t, !dash.Arches[2].Available)
+}
+
+func TestRunStopsWhenCancelled(t *testing.T) {
+	f := setup(t)
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	touch(t, filepath.Join(shared, "sha256", "abc123"))
+	t.Setenv("FAKE_CACHE", "abc123")
+	t.Setenv("FAKE_SLEEP", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	var log strings.Builder
+	_, err := Run(ctx, Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Jobs: 2, Cache: shared, Keep: true, Whole: true, Runner: f.runner, Log: &log}, []string{"bash", "dash"})
+	assert.That(t, errors.Is(err, context.DeadlineExceeded))
+	assert.That(t, time.Since(start) < 4*time.Second)
+	// Nothing after the cuts in flight ran, and the views are gone even
+	// though --keep holds on to the work dir.
+	assert.That(t, len(f.cuts(t)) <= 2)
+	views, err := os.ReadDir(filepath.Join(filepath.Dir(shared), "chisel-coverage"))
+	assert.NoError(t, err)
+	assert.Len(t, views, 0)
+	assert.That(t, strings.Contains(log.String(), "rootfs dirs: "))
+}
+
+func TestRunJobsCapsConcurrentCuts(t *testing.T) {
+	f := setup(t)
+	locks := t.TempDir()
+	t.Setenv("FAKE_LOCKS", locks)
+	// One slot: cuts on one arch never overlap even with many packages.
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Jobs: 1, Whole: true, Runner: f.runner}, []string{"bash", "dash"})
+	assert.NoError(t, err)
+	for _, p := range res {
+		assert.Nil(t, p.Arches[0].Err)
+	}
+	assert.Len(t, f.cuts(t), 4+2)
+}
+
+// stamped matches the timestamp every line of the tool's own log starts with.
+var stamped = regexp.MustCompile(`^\d\d-\d\d-\d\dT\d\d:\d\d:\d\d `)
+
+func TestRunVerbose(t *testing.T) {
+	f := setup(t)
+	t.Setenv("FAKE_NOCONTENT", "bash_cov-ignore-0")
+	t.Setenv("FAKE_FAIL", "bash_copyright")
+	var out strings.Builder
+	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "riscv64"}, Ignores: []string{"/nope/**"}, Whole: true, Runner: f.runner, Verbose: &out}, []string{"bash"})
+	assert.NoError(t, err)
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		assert.That(t, stamped.MatchString(l), l)
+		lines = append(lines, stamped.ReplaceAllString(l, ""))
+	}
+	// Only the summary carries a time, the run's total.
+	last := len(lines) - 1
+	assert.That(t, took.MatchString(lines[last]), lines[last])
+	lines[last] = took.ReplaceAllString(lines[last], "")
+	assert.EqualArrays(t, lines, []string{
+		"amd64 bash_cov-all 19",
+		"amd64 bash_config 3",
+		"amd64 bash_bins 4",
+		"amd64 bash_copyright error",
+		"riscv64 bash_cov-all n/a",
+		"5 cuts 26 paths 0.0mb",
+	})
+}
+
+var took = regexp.MustCompile(` \d+\.\ds$`)
+
+func TestRunKeep(t *testing.T) {
+	f := setup(t)
+	var log strings.Builder
+	_, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Keep: true, Whole: true, Runner: f.runner, Log: &log}, []string{"bash"})
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(log.String()), "\n")
+	assert.Len(t, lines, 2)
+	for i, l := range lines {
+		assert.That(t, stamped.MatchString(l), l)
+		lines[i] = stamped.ReplaceAllString(l, "")
+	}
+	rel := strings.TrimPrefix(lines[0], "release for bash: ")
+	work := strings.TrimPrefix(lines[1], "rootfs dirs: ")
+	defer os.RemoveAll(rel)
+	defer os.RemoveAll(work)
+	_, err = os.Stat(filepath.Join(rel, "slices", "bash.yaml"))
+	assert.NoError(t, err)
+	_, err = os.Stat(filepath.Join(work, "bash", "amd64", "bins", "usr", "bin", "bash"))
+	assert.NoError(t, err)
+}
+
+func TestFinishAndWorkers(t *testing.T) {
+	s := time.Second
+	// One free worker, the rest one seed apart: 16s of cuts over 4 workers
+	// end at (16 + 2.5 + 5 + 7.5) / 4.
+	assert.Equal(t, finish(16*s, 4, 1, 2500*time.Millisecond), 7750*time.Millisecond)
+	// A worker that would start after the end does not count.
+	assert.Equal(t, finish(2*s, 3, 1, 5*s), 2*s)
+	// Pooled views are free.
+	assert.Equal(t, finish(7*s, 4, 4, 2500*time.Millisecond), 1750*time.Millisecond)
+
+	r := &run{jobs: 8, viewCost: 6 * s, seed: 2500 * time.Millisecond}
+	assert.Equal(t, r.workers(16*s, 66), 4)
+	assert.Equal(t, r.workers(2*s, 66), 1)
+	r.views = make([]*cache.View, 3)
+	assert.Equal(t, r.workers(7*s, 18), 4)
+	r.viewCost = 0
+	assert.Equal(t, r.workers(7*s, 18), 8)
+	assert.Equal(t, r.workers(7*s, 3), 3)
+}

@@ -52,6 +52,18 @@ chisel does the work. for each package the tool writes a throwaway release holdi
 
 so archive selection, suites, priorities, pro archives, signatures, `arch:` lists and glob semantics are all whatever the particular chisel binary does. the cache is chisel's own too. 
 
+## library
+
+the building blocks are importable as `github.com/lczyk/chisel-coverage/pkg`, a module of its own:
+
+- `pkg/cuts` -- cut every slice of every package on every architecture, scheduled so concurrent chisels never share a writable cache, and get each rootfs listing back.
+- `pkg/sdf`, `pkg/cut`, `pkg/cache`, `pkg/release` -- the pieces it is made of: slice definitions stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, `--release` resolution.
+- `pkg/fold` -- normalise what names the architecture in a path, and fold architectures on what they share.
+
+```shell
+go get github.com/lczyk/chisel-coverage/pkg
+```
+
 ## build
 
 ```shell
