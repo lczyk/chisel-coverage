@@ -10,7 +10,7 @@ MODULES := . ./pkg
 # Lint tools run via `go run`, pinned so a new release cannot fail the build
 # unannounced. staticcheck reads a toolchain's export data, so v0.8.x is the
 # floor for the Go running here.
-STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.8.1
+STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.8.2
 DEADCODE    := golang.org/x/tools/cmd/deadcode@v0.48.0
 
 help:  ## Show this help
