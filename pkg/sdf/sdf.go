@@ -13,18 +13,31 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Slice names the tool adds to the synthesised file: the whole-deb slice,
-// one slice per ignore glob, IgnorePrefix followed by the glob's index, and
-// an empty slice whose cut only tells whether the package exists for an
+// Names are the slices a tool adds to the synthesised file, under a prefix
+// of its own: the whole-deb slice, one slice per ignore glob, and an empty
+// slice whose cut only tells whether the package exists for an
 // architecture. Valid chisel slice names, unlikely to clash with a real one.
-const (
-	AllSlice     = "cov-all"
-	IgnorePrefix = "cov-ignore-"
-	ProbeSlice   = "cov-probe"
-)
+type Names string
+
+// DefaultPrefix names the slices as chisel-coverage does.
+const DefaultPrefix Names = "cov"
+
+// All is the whole-deb slice, <prefix>-all.
+func (n Names) All() string { return string(n) + "-all" }
+
+// Probe is the empty slice, <prefix>-probe.
+func (n Names) Probe() string { return string(n) + "-probe" }
+
+// Ignore is the slice of the i-th ignore glob, <prefix>-ignore-<i>.
+func (n Names) Ignore(i int) string { return fmt.Sprintf("%s-ignore-%d", n, i) }
 
 // IsIgnore reports whether name is one of the ignore slices.
-func IsIgnore(name string) bool { return strings.HasPrefix(name, IgnorePrefix) }
+func (n Names) IsIgnore(name string) bool { return strings.HasPrefix(name, string(n)+"-ignore-") }
+
+// Reserved reports whether name is one of the tool's own slices.
+func (n Names) Reserved(name string) bool {
+	return name == n.All() || name == n.Probe() || n.IsIgnore(name)
+}
 
 // Definition is the stripped view of a slice definition file.
 type Definition struct {
@@ -189,8 +202,9 @@ func mergeArch(a, b []string) []string {
 // read, and one slice per ignore glob. A glob matching nothing fails a cut, so
 // the globs are cut apart to tell "matches nothing" from "matches these". It
 // also returns the names of the slices worth cutting: a slice with no entries
-// left is not cut, its result being empty regardless.
-func Synthesise(d *Definition, only []string, ignores []string) (file []byte, cuts []string, err error) {
+// left is not cut, its result being empty regardless. The tool's own slices
+// are named under names; a real slice with one of their names is refused.
+func Synthesise(d *Definition, only []string, ignores []string, names Names) (file []byte, cuts []string, err error) {
 	root := &yaml.Node{Kind: yaml.MappingNode}
 	root.Content = append(root.Content, str("package"), str(d.Package))
 	if d.Archive != "" {
@@ -209,9 +223,9 @@ func Synthesise(d *Definition, only []string, ignores []string) (file []byte, cu
 		slices.Content = append(slices.Content, str(name), slice)
 	}
 
-	addSlice(AllSlice, []Entry{{Path: "/**"}})
-	cuts = append(cuts, AllSlice)
-	addSlice(ProbeSlice, nil)
+	addSlice(names.All(), []Entry{{Path: "/**"}})
+	cuts = append(cuts, names.All())
+	addSlice(names.Probe(), nil)
 
 	wanted := map[string]bool{}
 	for _, name := range only {
@@ -224,8 +238,8 @@ func Synthesise(d *Definition, only []string, ignores []string) (file []byte, cu
 		if only != nil && !wanted[s.Name] {
 			continue
 		}
-		if s.Name == AllSlice || s.Name == ProbeSlice || IsIgnore(s.Name) {
-			return nil, nil, fmt.Errorf("%s: slice name %q is reserved by chisel-coverage", d.Package, s.Name)
+		if names.Reserved(s.Name) {
+			return nil, nil, fmt.Errorf("%s: slice name %q is reserved for the %s-* slices of the run", d.Package, s.Name, names)
 		}
 		if len(s.Entries) > 0 {
 			addSlice(s.Name, s.Entries)
@@ -234,7 +248,7 @@ func Synthesise(d *Definition, only []string, ignores []string) (file []byte, cu
 	}
 
 	for i, g := range ignores {
-		name := fmt.Sprintf("%s%d", IgnorePrefix, i)
+		name := names.Ignore(i)
 		addSlice(name, []Entry{{Path: g}})
 		cuts = append(cuts, name)
 	}

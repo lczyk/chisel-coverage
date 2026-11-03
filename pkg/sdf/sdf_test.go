@@ -107,7 +107,7 @@ func TestSynthesise(t *testing.T) {
 		{Name: "copyright", Entries: []Entry{{Path: "/usr/share/doc/bash/copyright"}}},
 	}}
 
-	file, cuts, err := Synthesise(d, nil, []string{"/usr/share/man/**", "/usr/share/doc/**"})
+	file, cuts, err := Synthesise(d, nil, []string{"/usr/share/man/**", "/usr/share/doc/**"}, DefaultPrefix)
 	assert.NoError(t, err)
 	assert.EqualArrays(t, cuts, []string{"cov-all", "bins", "copyright", "cov-ignore-0", "cov-ignore-1"})
 	assert.Equal(t, string(file), `package: bash
@@ -133,25 +133,36 @@ slices:
       /usr/share/doc/**:
 `)
 
-	file, cuts, err = Synthesise(d, []string{"copyright"}, nil)
+	file, cuts, err = Synthesise(d, []string{"copyright"}, nil, DefaultPrefix)
 	assert.NoError(t, err)
 	assert.EqualArrays(t, cuts, []string{"cov-all", "copyright"})
 	assert.That(t, !strings.Contains(string(file), "bins"))
 	assert.That(t, !strings.Contains(string(file), "cov-ignore"))
 
-	_, cuts, err = Synthesise(d, []string{}, nil)
+	_, cuts, err = Synthesise(d, []string{}, nil, DefaultPrefix)
 	assert.NoError(t, err)
 	assert.EqualArrays(t, cuts, []string{"cov-all"})
 
-	_, _, err = Synthesise(d, []string{"nope"}, nil)
+	_, _, err = Synthesise(d, []string{"nope"}, nil, DefaultPrefix)
 	assert.Error(t, err, `no slice "nope"`)
 
-	d.Slices = append(d.Slices, Slice{Name: AllSlice, Entries: []Entry{{Path: "/x"}}})
-	_, _, err = Synthesise(d, nil, nil)
+	d.Slices = append(d.Slices, Slice{Name: DefaultPrefix.All(), Entries: []Entry{{Path: "/x"}}})
+	_, _, err = Synthesise(d, nil, nil, DefaultPrefix)
 	assert.Error(t, err, "reserved")
 	d.Slices[len(d.Slices)-1].Name = "cov-ignore-7"
-	_, _, err = Synthesise(d, nil, nil)
+	_, _, err = Synthesise(d, nil, nil, DefaultPrefix)
 	assert.Error(t, err, "reserved")
+
+	// Another prefix names the run's slices and frees the cov-* names.
+	d.Slices = d.Slices[:len(d.Slices)-1]
+	file, cuts, err = Synthesise(d, nil, []string{"/usr/share/man/**"}, "file")
+	assert.NoError(t, err)
+	assert.EqualArrays(t, cuts[:1], []string{"file-all"})
+	assert.Equal(t, cuts[len(cuts)-1], "file-ignore-0")
+	assert.ContainsString(t, string(file), "file-probe:")
+	assert.That(t, !strings.Contains(string(file), "cov-"))
+	assert.That(t, Names("file").Reserved("file-probe") && !Names("file").Reserved("cov-all"))
+	assert.That(t, Names("file").IsIgnore("file-ignore-3") && !Names("file").IsIgnore("file-ignored"))
 }
 
 func paths(s *Slice) []string {

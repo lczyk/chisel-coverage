@@ -73,7 +73,7 @@ func Assemble(slices []string, c cuts.Arch) Arch {
 	}
 	ignore := map[string]bool{}
 	for name, paths := range c.Slices {
-		if !sdf.IsIgnore(name) {
+		if !sdf.DefaultPrefix.IsIgnore(name) {
 			continue
 		}
 		for _, path := range paths {
@@ -81,7 +81,7 @@ func Assemble(slices []string, c cuts.Arch) Arch {
 		}
 	}
 	a.Covered, a.Uncovered, a.Ignored = []string{}, []string{}, []string{}
-	for _, path := range c.Slices[sdf.AllSlice] {
+	for _, path := range c.Slices[sdf.DefaultPrefix.All()] {
 		switch {
 		case covered[path]:
 			a.Covered = append(a.Covered, path)
@@ -91,7 +91,7 @@ func Assemble(slices []string, c cuts.Arch) Arch {
 			a.Uncovered = append(a.Uncovered, path)
 		}
 	}
-	a.Total = len(c.Slices[sdf.AllSlice])
+	a.Total = len(c.Slices[sdf.DefaultPrefix.All()])
 	return a
 }
 

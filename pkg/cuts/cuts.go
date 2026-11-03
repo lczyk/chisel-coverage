@@ -34,6 +34,10 @@ type Options struct {
 	Only    []string // --slice values, bare or <package>_<slice>; nil means all, empty means none
 	Ignores []string
 	Whole   bool // cut the whole-deb slice too and lead with it; else the probe leads
+	// Prefix names the run's own slices (<prefix>-all, <prefix>-probe,
+	// <prefix>-ignore-<n>) in the synthesised file and the logs;
+	// sdf.DefaultPrefix when empty.
+	Prefix string
 	// Optional lets a package have no slice definition file: it is cut as if
 	// its file declared no slices, so only the whole-deb and ignore slices.
 	Optional bool
@@ -52,7 +56,7 @@ type Options struct {
 type Cut struct {
 	Package string
 	Arch    string
-	Slice   string // bare name: a real slice, sdf.AllSlice or an ignore slice
+	Slice   string // bare name: a real slice, the whole-deb slice or an ignore slice
 	Root    string // the rootfs, gone once Visit returns unless Options.Keep
 	Result  *cut.Result
 }
@@ -69,8 +73,8 @@ type Arch struct {
 	// lead architecture only and probed on the rest. Slices is the lead's
 	// and Visit never ran for this architecture.
 	StandIn string
-	// Slices maps every slice that was to be cut (the real ones, sdf.AllSlice
-	// with Options.Whole, the ignore slices) to the paths of its rootfs. A
+	// Slices maps every slice that was to be cut (the real ones, the whole-deb
+	// slice with Options.Whole, the ignore slices) to the paths of its rootfs. A
 	// real slice with nothing to cut, or an ignore slice matching nothing,
 	// maps to an empty list.
 	Slices map[string][]string
@@ -93,6 +97,7 @@ type prepared struct {
 type run struct {
 	ctx      context.Context
 	opts     Options
+	names    sdf.Names
 	work     string
 	prepared []*prepared
 	results  []Package
@@ -156,7 +161,10 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{ctx: ctx, opts: opts, jobs: Jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), done: make([]int, len(pkgs)), start: time.Now()}
+	r := &run{ctx: ctx, opts: opts, names: sdf.Names(opts.Prefix), jobs: Jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), done: make([]int, len(pkgs)), start: time.Now()}
+	if r.names == "" {
+		r.names = sdf.DefaultPrefix
+	}
 	defer r.cleanup()
 	if r.jobs > 1 && opts.Cache != "" {
 		r.viewCost = cache.Cost(opts.Cache)
@@ -310,7 +318,7 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(only, ", "))
 		}
 	}
-	file, cuts, err := sdf.Synthesise(def, keep, r.opts.Ignores)
+	file, cuts, err := sdf.Synthesise(def, keep, r.opts.Ignores, r.names)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +327,7 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 	// still tells availability, version and deb architecture, without
 	// extracting anything.
 	if !r.opts.Whole {
-		cuts[0] = sdf.ProbeSlice
+		cuts[0] = r.names.Probe()
 	}
 	rel, err := temprelease.New(chiselYAML)
 	if err != nil {
@@ -630,7 +638,7 @@ func (r *run) cutUnit(w *worker, u unit) {
 	root := filepath.Join(r.work, p.def.Package, arch, name)
 	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
 	r.cutf(arch, p.def.Package+"_"+name, res, err)
-	if err == nil && r.opts.Visit != nil && name != sdf.ProbeSlice {
+	if err == nil && r.opts.Visit != nil && name != r.names.Probe() {
 		r.opts.Visit(Cut{Package: p.def.Package, Arch: arch, Slice: name, Root: root, Result: res})
 	}
 	r.discard(root)
@@ -639,7 +647,7 @@ func (r *run) cutUnit(w *worker, u unit) {
 	switch {
 	case errors.Is(err, cut.ErrNotAvailable) && u.ci == 0:
 		// Not on this architecture; the cell stays unavailable.
-	case errors.Is(err, cut.ErrNoContent) && sdf.IsIgnore(name):
+	case errors.Is(err, cut.ErrNoContent) && r.names.IsIgnore(name):
 		// An ignore glob matching nothing in this package ignores nothing.
 	case err != nil:
 		if c.err == nil {
@@ -649,7 +657,7 @@ func (r *run) cutUnit(w *worker, u unit) {
 		if c.sets == nil {
 			c.sets = map[string][]string{}
 		}
-		if name != sdf.ProbeSlice {
+		if name != r.names.Probe() {
 			c.sets[name] = res.Paths
 		}
 		if u.ci == 0 {
@@ -678,7 +686,7 @@ func (r *run) assemble(pi, ai int) Arch {
 		a.Slices[name] = []string{}
 	}
 	for _, name := range p.cuts {
-		if name != sdf.ProbeSlice {
+		if name != r.names.Probe() {
 			a.Slices[name] = []string{}
 		}
 	}
@@ -708,9 +716,10 @@ func (r *run) removeViews() {
 // architecture's result for it.
 func (r *run) probe(w *worker, u unit) Arch {
 	p, arch := r.prepared[u.pi], r.opts.Arches[u.ai]
-	root := filepath.Join(r.work, p.def.Package, arch, sdf.ProbeSlice)
-	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+sdf.ProbeSlice)
-	r.cutf(arch, p.def.Package+"_"+sdf.ProbeSlice, res, err)
+	probe := r.names.Probe()
+	root := filepath.Join(r.work, p.def.Package, arch, probe)
+	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+probe)
+	r.cutf(arch, p.def.Package+"_"+probe, res, err)
 	r.discard(root)
 	if errors.Is(err, cut.ErrNotAvailable) {
 		return Arch{Arch: arch}
