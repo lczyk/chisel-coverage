@@ -5,6 +5,7 @@
 ![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/lczyk/chisel-coverage)
 ![GitHub Tag](https://img.shields.io/github/v/tag/lczyk/chisel-coverage?filter=v*&sort=semver&label=release)
 [![Go Reference](https://pkg.go.dev/badge/github.com/lczyk/chisel-coverage.svg)](https://pkg.go.dev/github.com/lczyk/chisel-coverage)
+[![lint_and_test](https://github.com/lczyk/chisel-coverage/actions/workflows/lint_and_test.yml/badge.svg)](https://github.com/lczyk/chisel-coverage/actions/workflows/lint_and_test.yml)
 
 development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture.
 
