@@ -7,16 +7,17 @@ package fold
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/lczyk/chisel-proxy/pkg/deb"
 )
 
 // words is what names an architecture as a word of a path: its own name,
-// the cpu of its multiarch triplet, and what java, go, dotnet, libunwind
-// and ruby call it.
+// the cpu of its multiarch triplet, and what debian's cross toolchain
+// package names, java, go, dotnet, libunwind and ruby call it.
 var words = map[string][]string{
-	"amd64":   {"amd64", "x86_64", "x64"},
+	"amd64":   {"amd64", "x86_64", "x86-64", "x64"},
 	"arm64":   {"arm64", "aarch64"},
 	"armhf":   {"armhf", "arm"},
 	"i386":    {"i386", "i686", "x86", "386"},
@@ -123,6 +124,39 @@ type Group struct {
 	Entries []Entry
 }
 
+type member struct {
+	arch, key, raw string
+}
+
+// partition splits the members by what by returns, in first-seen order.
+func partition(members []member, by func(member) string) [][]member {
+	index := map[string]int{}
+	var out [][]member
+	for _, m := range members {
+		k := by(m)
+		i, ok := index[k]
+		if !ok {
+			i = len(out)
+			index[k] = i
+			out = append(out, nil)
+		}
+		out[i] = append(out[i], m)
+	}
+	return out
+}
+
+// hasTwice reports whether an architecture appears twice among members.
+func hasTwice(members []member) bool {
+	seen := map[string]bool{}
+	for _, m := range members {
+		if seen[m.arch] {
+			return true
+		}
+		seen[m.arch] = true
+	}
+	return false
+}
+
 // Fold groups the items by the architectures that have them: items[i]
 // belongs to arches[i]. Items with the same tag fold when their keys are
 // equal or their raw forms are, and what either joins is one entry: a path
@@ -151,9 +185,6 @@ func Fold(arches []string, items [][]Item) []Group {
 			parent[b] = b
 		}
 		parent[find(a)] = find(b)
-	}
-	type member struct {
-		arch, key, raw string
 	}
 	for i := range arches {
 		for _, it := range items[i] {
@@ -202,32 +233,29 @@ func Fold(arches []string, items [][]Item) []Group {
 	}
 	for _, root := range roots {
 		f := byRoot[root]
-		seen := map[string]bool{}
-		twice := false
-		for _, m := range f.members {
-			twice = twice || seen[m.arch]
-			seen[m.arch] = true
-		}
-		if !twice {
+		if !hasTwice(f.members) {
 			emit(f.tag, f.members)
 			continue
 		}
-		byKey := map[string][]member{}
-		var keys []string
-		for _, m := range f.members {
-			if byKey[m.key] == nil {
-				keys = append(keys, m.key)
+		// Keys alone, and where a key still holds one architecture twice
+		// (the x32 abi folds onto gnu), the k-th item of every
+		// architecture makes the k-th entry, so an entry never lists an
+		// architecture twice and the first ones still fold.
+		for _, byKey := range partition(f.members, func(m member) string { return m.key }) {
+			nth := map[string]int{}
+			for _, byN := range partition(byKey, func(m member) string {
+				nth[m.arch]++
+				return strconv.Itoa(nth[m.arch])
+			}) {
+				emit(f.tag, byN)
 			}
-			byKey[m.key] = append(byKey[m.key], m)
-		}
-		for _, k := range keys {
-			emit(f.tag, byKey[k])
 		}
 	}
+	// By what a report shows, so the blocks read sorted.
 	sort.SliceStable(entries, func(i, j int) bool {
 		a, b := entries[i].entry, entries[j].entry
-		if a.Key != b.Key {
-			return a.Key < b.Key
+		if sa, sb := a.Shown(), b.Shown(); sa != sb {
+			return sa < sb
 		}
 		return a.Tag < b.Tag
 	})

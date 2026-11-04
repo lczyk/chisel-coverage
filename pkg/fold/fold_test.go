@@ -35,6 +35,10 @@ func TestNormalise(t *testing.T) {
 		{"/usr/src/rustc/src/ci/docker/host-x86_64/dist-armhf-linux", "i386", "/usr/src/rustc/src/ci/docker/host-x86_64/dist-armhf-linux"},
 		{"/usr/src/rustc/src/ci/docker/host-x86_64/dist-armhf-linux", "armhf", "/usr/src/rustc/src/ci/docker/host-x86_64/dist-<arch>-linux"},
 		{"/usr/share/go-1.26/src/cmd/compile/internal/arm64/ssa.go", "armhf", "/usr/share/go-1.26/src/cmd/compile/internal/arm64/ssa.go"},
+		// Debian's cross toolchain packages spell amd64 as x86-64, which is
+		// not i386's x86 followed by -64.
+		{"/usr/share/doc/binutils-x86-64-linux-gnu/copyright", "amd64", "/usr/share/doc/binutils-<arch>-linux-<gnu>/copyright"},
+		{"/usr/share/doc/binutils-x86-64-linux-gnu/copyright", "i386", "/usr/share/doc/binutils-x86-64-linux-gnu/copyright"},
 		{"/usr/lib/i386-linux-gnu/x", "amd64", "/usr/lib/i386-linux-gnu/x"},
 		{"/usr/share/amd64foo/amd64", "arm64", "/usr/share/amd64foo/amd64"},
 		{"/usr/share/amd64foo/amd64", "amd64", "/usr/share/amd64foo/<arch>"},
@@ -81,7 +85,9 @@ func TestFoldOnRawToo(t *testing.T) {
 }
 
 // When folding on raw forms would put two items of one architecture in
-// one entry, the keys alone decide.
+// one entry, the keys alone decide, and where a key still holds one
+// architecture twice (the x32 abi folds onto gnu), the k-th item of every
+// architecture makes the k-th entry.
 func TestFoldTwiceOnOneArch(t *testing.T) {
 	g := Fold([]string{"amd64", "arm64"}, [][]Item{
 		{item("/x/amd64/f", "amd64"), item("/x/aarch64/f", "amd64")},
@@ -92,6 +98,33 @@ func TestFoldTwiceOnOneArch(t *testing.T) {
 	assert.Equal(t, g[0].Entries[0].Shown(), "/x/<arch>/f")
 	assert.EqualArrays(t, g[1].Arches, []string{"amd64"})
 	assert.Equal(t, g[1].Entries[0].Shown(), "/x/aarch64/f")
+
+	g = Fold([]string{"amd64", "arm64"}, [][]Item{
+		{item("/usr/lib/x86_64-linux-gnu/x", "amd64"), item("/usr/lib/x86_64-linux-gnux32/x", "amd64")},
+		{item("/usr/lib/aarch64-linux-gnu/x", "arm64")},
+	})
+	assert.Len(t, g, 2)
+	for _, gr := range g {
+		for _, e := range gr.Entries {
+			assert.Len(t, e.Raw, len(gr.Arches))
+		}
+	}
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
+	assert.EqualArrays(t, g[0].Entries[0].Raw, []string{"/usr/lib/x86_64-linux-gnu/x", "/usr/lib/aarch64-linux-gnu/x"})
+	assert.EqualArrays(t, g[1].Arches, []string{"amd64"})
+	assert.Equal(t, g[1].Entries[0].Shown(), "/usr/lib/x86_64-linux-gnux32/x")
+}
+
+// Entries are sorted by what is shown, which is the raw form when the
+// architectures agree on it, not by the key.
+func TestFoldSortsByShown(t *testing.T) {
+	g := Fold([]string{"amd64", "armhf"}, [][]Item{
+		{item("/lib/arm", "amd64"), item("/lib/apple", "amd64")},
+		{item("/lib/arm", "armhf"), item("/lib/apple", "armhf")},
+	})
+	assert.Len(t, g, 1)
+	assert.Equal(t, g[0].Entries[0].Shown(), "/lib/apple")
+	assert.Equal(t, g[0].Entries[1].Shown(), "/lib/arm")
 }
 
 func TestFoldMostArchesFirst(t *testing.T) {
