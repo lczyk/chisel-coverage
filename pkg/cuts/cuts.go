@@ -565,7 +565,7 @@ func (r *run) worker(isolate bool) *worker {
 
 // prepare gives an isolated worker its view before its first unit, on arch
 // for pkg: one an earlier worker left when there is one, else a new one,
-// logged like a cut as "<arch> <pkg>_cov-cache-view <blobs>".
+// logged like a cut as "<arch> <pkg>_<prefix>-cache-view <blobs>".
 // When no view can be made the worker shares chisel's cache as is.
 func (w *worker) prepare(arch, pkg string) {
 	if !w.isolate {
@@ -587,13 +587,13 @@ func (w *worker) prepare(arch, pkg string) {
 		view, err := cache.New(r.opts.Cache)
 		r.seeding.Unlock()
 		if err != nil {
-			r.logf("%s %s_cov-cache-view error: %v; sharing chisel's cache instead", arch, pkg, err)
+			r.logf("%s %s_%s-cache-view error: %v; sharing chisel's cache instead", arch, pkg, r.names, err)
 			return
 		}
 		r.mu.Lock()
 		r.seed = time.Since(start)
 		r.mu.Unlock()
-		r.verbosef("%s %s_cov-cache-view %d", arch, pkg, view.Blobs())
+		r.verbosef("%s %s_%s-cache-view %d", arch, pkg, r.names, view.Blobs())
 		w.view = view
 	}
 	w.runner.CacheHome = w.view.Home
