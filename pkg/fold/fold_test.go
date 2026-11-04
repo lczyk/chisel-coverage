@@ -21,7 +21,20 @@ func TestNormalise(t *testing.T) {
 		{"/usr/lib/jvm/java-21-openjdk-amd64/bin/java", "amd64", "/usr/lib/jvm/java-21-openjdk-<arch>/bin/java"},
 		{"/usr/share/doc/gcc-14-base/README.Debian.armhf.gz", "armhf", "/usr/share/doc/gcc-14-base/README.Debian.<arch>.gz"},
 		{"/usr/lib/s390x-linux-gnu/s390x/", "s390x", "/usr/lib/<arch>-linux-<gnu>/<arch>/"},
-		{"/etc/apparmor.d/arm", "armhf", "/etc/apparmor.d/arm"},
+		// A word of the architecture anywhere, in every spelling an
+		// ecosystem uses; a word of another architecture is left alone.
+		{"/etc/apparmor.d/arm", "armhf", "/etc/apparmor.d/<arch>"},
+		{"/etc/apparmor.d/apparmor", "armhf", "/etc/apparmor.d/apparmor"},
+		{"/usr/lib/jvm/java-8-openjdk-arm64/jre/lib/aarch64/jli/libjli.so", "arm64", "/usr/lib/jvm/java-8-openjdk-<arch>/jre/lib/<arch>/jli/libjli.so"},
+		{"/usr/lib/jvm/java-8-openjdk-ppc64el/jre/lib/ppc64le/libjava.so", "ppc64el", "/usr/lib/jvm/java-8-openjdk-<arch>/jre/lib/<arch>/libjava.so"},
+		{"/usr/lib/go-1.26/pkg/tool/linux_386/asm", "i386", "/usr/lib/go-1.26/pkg/tool/linux_<arch>/asm"},
+		{"/usr/lib/go-1.26/pkg/tool/linux_arm/asm", "armhf", "/usr/lib/go-1.26/pkg/tool/linux_<arch>/asm"},
+		{"/usr/lib/i386-linux-gnu/libunwind-x86.so.8", "i386", "/usr/lib/<arch>-linux-<gnu>/libunwind-<arch>.so.8"},
+		{"/usr/lib/x86_64-linux-gnu/libunwind-x86_64.so.8", "amd64", "/usr/lib/<arch>-linux-<gnu>/libunwind-<arch>.so.8"},
+		{"/usr/lib/dotnet/packs/runtime.ubuntu.26.04-x64.Microsoft.DotNet.ILCompiler", "amd64", "/usr/lib/dotnet/packs/runtime.ubuntu.26.04-<arch>.Microsoft.DotNet.ILCompiler"},
+		{"/usr/src/rustc/src/ci/docker/host-x86_64/dist-armhf-linux", "i386", "/usr/src/rustc/src/ci/docker/host-x86_64/dist-armhf-linux"},
+		{"/usr/src/rustc/src/ci/docker/host-x86_64/dist-armhf-linux", "armhf", "/usr/src/rustc/src/ci/docker/host-x86_64/dist-<arch>-linux"},
+		{"/usr/share/go-1.26/src/cmd/compile/internal/arm64/ssa.go", "armhf", "/usr/share/go-1.26/src/cmd/compile/internal/arm64/ssa.go"},
 		{"/usr/lib/i386-linux-gnu/x", "amd64", "/usr/lib/i386-linux-gnu/x"},
 		{"/usr/share/amd64foo/amd64", "arm64", "/usr/share/amd64foo/amd64"},
 		{"/usr/share/amd64foo/amd64", "amd64", "/usr/share/amd64foo/<arch>"},
@@ -48,6 +61,37 @@ func TestFoldSingletonShowsRaw(t *testing.T) {
 	assert.EqualArrays(t, g[0].Entries[0].Raw, []string{"/usr/lib/x86_64-linux-gnu/", "/usr/lib/aarch64-linux-gnu/"})
 	assert.EqualArrays(t, g[1].Arches, []string{"s390x"})
 	assert.Equal(t, g[1].Entries[0].Shown(), "/usr/lib/s390x-linux-gnu/ld64.so.1")
+}
+
+// A path that is the same on every architecture folds however its key came
+// out, and is shown as it is.
+func TestFoldOnRawToo(t *testing.T) {
+	g := Fold([]string{"amd64", "arm64", "armhf"}, [][]Item{
+		{item("/etc/apparmor.d/arm", "amd64"), item("/usr/bin/aarch64-linux-gnu-gcc", "amd64")},
+		{item("/etc/apparmor.d/arm", "arm64"), item("/usr/bin/aarch64-linux-gnu-gcc", "arm64")},
+		{item("/etc/apparmor.d/arm", "armhf"), item("/usr/bin/arm-linux-gnueabihf-gcc", "armhf")},
+	})
+	assert.Len(t, g, 1)
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64", "armhf"})
+	assert.Len(t, g[0].Entries, 2)
+	assert.Equal(t, g[0].Entries[0].Shown(), "/etc/apparmor.d/arm")
+	// amd64 and arm64 share the raw path, arm64 and armhf the key.
+	assert.Equal(t, g[0].Entries[1].Shown(), "/usr/bin/<arch>-linux-<gnu>-gcc")
+	assert.EqualArrays(t, g[0].Entries[1].Raw, []string{"/usr/bin/aarch64-linux-gnu-gcc", "/usr/bin/aarch64-linux-gnu-gcc", "/usr/bin/arm-linux-gnueabihf-gcc"})
+}
+
+// When folding on raw forms would put two items of one architecture in
+// one entry, the keys alone decide.
+func TestFoldTwiceOnOneArch(t *testing.T) {
+	g := Fold([]string{"amd64", "arm64"}, [][]Item{
+		{item("/x/amd64/f", "amd64"), item("/x/aarch64/f", "amd64")},
+		{item("/x/aarch64/f", "arm64")},
+	})
+	assert.Len(t, g, 2)
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
+	assert.Equal(t, g[0].Entries[0].Shown(), "/x/<arch>/f")
+	assert.EqualArrays(t, g[1].Arches, []string{"amd64"})
+	assert.Equal(t, g[1].Entries[0].Shown(), "/x/aarch64/f")
 }
 
 func TestFoldMostArchesFirst(t *testing.T) {
