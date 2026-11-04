@@ -16,6 +16,8 @@ func TestNormalise(t *testing.T) {
 		{"/usr/lib/python3.14/lib-dynload/_ssl.cpython-314-x86_64-linux-gnu.so", "amd64", "/usr/lib/python3.14/lib-dynload/_ssl.cpython-314-<arch>-linux-<gnu>.so"},
 		{"/usr/lib/gcc/i686-linux-gnu/13/", "i386", "/usr/lib/gcc/<arch>-linux-<gnu>/13/"},
 		{"/usr/lib/i386-linux-gnu/", "i386", "/usr/lib/<arch>-linux-<gnu>/"},
+		{"/usr/lib/ruby/gems/3.3.0/extensions/x86-linux-gnu/3.3.0/", "i386", "/usr/lib/ruby/gems/3.3.0/extensions/<arch>-linux-<gnu>/3.3.0/"},
+		{"/usr/lib/x86-linux-gnu/x", "amd64", "/usr/lib/x86-linux-gnu/x"},
 		{"/usr/lib/jvm/java-21-openjdk-amd64/bin/java", "amd64", "/usr/lib/jvm/java-21-openjdk-<arch>/bin/java"},
 		{"/usr/share/doc/gcc-14-base/README.Debian.armhf.gz", "armhf", "/usr/share/doc/gcc-14-base/README.Debian.<arch>.gz"},
 		{"/usr/lib/s390x-linux-gnu/s390x/", "s390x", "/usr/lib/<arch>-linux-<gnu>/<arch>/"},
