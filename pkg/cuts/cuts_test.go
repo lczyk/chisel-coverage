@@ -3,6 +3,7 @@ package cuts
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -167,9 +168,13 @@ func setup(t *testing.T) *fixture {
 	return f
 }
 
+// cuts lists the cuts the fake ran so far, none when none ran.
 func (f *fixture) cuts(t *testing.T) []string {
 	t.Helper()
 	b, err := os.ReadFile(f.log)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	assert.NoError(t, err)
 	return strings.Split(strings.TrimSpace(string(b)), "\n")
 }
