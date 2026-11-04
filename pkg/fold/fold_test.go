@@ -17,7 +17,7 @@ func TestNormalise(t *testing.T) {
 		{"/usr/lib/gcc/i686-linux-gnu/13/", "i386", "/usr/lib/gcc/<arch>-linux-<gnu>/13/"},
 		{"/usr/lib/i386-linux-gnu/", "i386", "/usr/lib/<arch>-linux-<gnu>/"},
 		{"/usr/lib/ruby/gems/3.3.0/extensions/x86-linux-gnu/3.3.0/", "i386", "/usr/lib/ruby/gems/3.3.0/extensions/<arch>-linux-<gnu>/3.3.0/"},
-		{"/usr/lib/x86-linux-gnu/x", "amd64", "/usr/lib/x86-linux-gnu/x"},
+		{"/usr/lib/x86-linux-gnu/x", "amd64", "/usr/lib/<arch>-linux-<gnu>/x"},
 		{"/usr/lib/jvm/java-21-openjdk-amd64/bin/java", "amd64", "/usr/lib/jvm/java-21-openjdk-<arch>/bin/java"},
 		{"/usr/share/doc/gcc-14-base/README.Debian.armhf.gz", "armhf", "/usr/share/doc/gcc-14-base/README.Debian.<arch>.gz"},
 		{"/usr/lib/s390x-linux-gnu/s390x/", "s390x", "/usr/lib/<arch>-linux-<gnu>/<arch>/"},
@@ -39,6 +39,10 @@ func TestNormalise(t *testing.T) {
 		// not i386's x86 followed by -64.
 		{"/usr/share/doc/binutils-x86-64-linux-gnu/copyright", "amd64", "/usr/share/doc/binutils-<arch>-linux-<gnu>/copyright"},
 		{"/usr/share/doc/binutils-x86-64-linux-gnu/copyright", "i386", "/usr/share/doc/binutils-x86-64-linux-gnu/copyright"},
+		// The kernel headers' arch directory is x86 on amd64 and i386 alike.
+		{"/usr/src/linux-headers-7.0.0-42-generic/arch/x86/include/asm/io.h", "amd64", "/usr/src/linux-headers-7.0.0-42-generic/arch/<arch>/include/asm/io.h"},
+		{"/usr/src/linux-headers-7.0.0-42-generic/arch/x86/include/asm/io.h", "i386", "/usr/src/linux-headers-7.0.0-42-generic/arch/<arch>/include/asm/io.h"},
+		{"/usr/src/linux-headers-7.0.0-42-generic/arch/riscv/include/asm/io.h", "riscv64", "/usr/src/linux-headers-7.0.0-42-generic/arch/<arch>/include/asm/io.h"},
 		{"/usr/lib/i386-linux-gnu/x", "amd64", "/usr/lib/i386-linux-gnu/x"},
 		{"/usr/share/amd64foo/amd64", "arm64", "/usr/share/amd64foo/amd64"},
 		{"/usr/share/amd64foo/amd64", "amd64", "/usr/share/amd64foo/<arch>"},
@@ -113,6 +117,25 @@ func TestFoldTwiceOnOneArch(t *testing.T) {
 	assert.EqualArrays(t, g[0].Entries[0].Raw, []string{"/usr/lib/x86_64-linux-gnu/x", "/usr/lib/aarch64-linux-gnu/x"})
 	assert.EqualArrays(t, g[1].Arches, []string{"amd64"})
 	assert.Equal(t, g[1].Entries[0].Shown(), "/usr/lib/x86_64-linux-gnux32/x")
+}
+
+// Tags fold on their raw forms too: a symlink whose target names the
+// architecture on one of them and is the same everywhere.
+func TestFoldOnRawTagToo(t *testing.T) {
+	g := Fold([]string{"amd64", "arm64"}, [][]Item{
+		{{Key: "/usr/bin/aarch64-linux-gnu-ld", Raw: "/usr/bin/aarch64-linux-gnu-ld", Tag: "symbolic link to aarch64-linux-gnu-ld.bfd", RawTag: "symbolic link to aarch64-linux-gnu-ld.bfd"}},
+		{{Key: "/usr/bin/<arch>-linux-<gnu>-ld", Raw: "/usr/bin/aarch64-linux-gnu-ld", Tag: "symbolic link to <arch>-linux-<gnu>-ld.bfd", RawTag: "symbolic link to aarch64-linux-gnu-ld.bfd"}},
+	})
+	assert.Len(t, g, 1)
+	assert.EqualArrays(t, g[0].Arches, []string{"amd64", "arm64"})
+	assert.Equal(t, g[0].Entries[0].Shown(), "/usr/bin/aarch64-linux-gnu-ld")
+	assert.Equal(t, g[0].Entries[0].Tag, "symbolic link to <arch>-linux-<gnu>-ld.bfd")
+	// Different raw tags with no normalised form in common stay apart.
+	g = Fold([]string{"amd64", "arm64"}, [][]Item{
+		{{Key: "/a", Raw: "/a", Tag: "symbolic link to ld.1.gz"}},
+		{{Key: "/a", Raw: "/a", Tag: "symbolic link to <arch>-linux-<gnu>-ld.bfd.1.gz", RawTag: "symbolic link to aarch64-linux-gnu-ld.bfd.1.gz"}},
+	})
+	assert.Len(t, g, 2)
 }
 
 // Entries are sorted by what is shown, which is the raw form when the
