@@ -15,9 +15,11 @@ import (
 
 // words is what names an architecture as a word of a path: its own name,
 // the cpu of its multiarch triplet, and what debian's cross toolchain
-// package names, java, go, dotnet, libunwind and ruby call it.
+// package names, java, go, dotnet, libunwind, ruby and the kernel's arch
+// directories call it. x86 is both amd64's and i386's, as in the kernel
+// headers' arch/x86.
 var words = map[string][]string{
-	"amd64":   {"amd64", "x86_64", "x86-64", "x64"},
+	"amd64":   {"amd64", "x86_64", "x86-64", "x64", "x86"},
 	"arm64":   {"arm64", "aarch64"},
 	"armhf":   {"armhf", "arm"},
 	"i386":    {"i386", "i686", "x86", "386"},
@@ -90,12 +92,14 @@ func alnum(c byte) bool {
 // Item is one thing an architecture has. Key and Tag together say which
 // items of different architectures are the same: Key is the normalised
 // form (a path after Normalise, say) and Tag whatever else must agree for
-// the items to fold (a state, a description). Raw is the architecture's own
-// form of the item, which folds too when it is the same everywhere.
+// the items to fold (a state, a description). Raw and RawTag are the
+// architecture's own forms of the two, which fold too when they are the
+// same everywhere; a RawTag of "" is the Tag itself.
 type Item struct {
-	Key string
-	Tag string
-	Raw string
+	Key    string
+	Tag    string
+	Raw    string
+	RawTag string
 }
 
 // Entry is one key and tag every architecture of a group has, with each
@@ -125,7 +129,7 @@ type Group struct {
 }
 
 type member struct {
-	arch, key, raw string
+	arch, key, raw, tag, rawTag string
 }
 
 // partition splits the members by what by returns, in first-seen order.
@@ -158,12 +162,13 @@ func hasTwice(members []member) bool {
 }
 
 // Fold groups the items by the architectures that have them: items[i]
-// belongs to arches[i]. Items with the same tag fold when their keys are
-// equal or their raw forms are, and what either joins is one entry: a path
-// that is the same word for word on every architecture folds whatever
-// Normalise made of it, so a spelling in Normalise can only ever merge.
-// The entry's key is the normalised one where a member's raw form differs
-// from its key, else the raw form itself. Should both ways of folding pull
+// belongs to arches[i]. Items fold when their keys are equal or their raw
+// forms are, and their tags are equal or their raw tags are, and what any
+// of that joins is one entry: a path that is the same word for word on
+// every architecture folds whatever Normalise made of it, so a spelling in
+// Normalise can only ever merge. The entry's key and tag are the
+// normalised ones where a member's raw form differs from them, else the
+// raw forms themselves. Should both ways of folding pull
 // two items of one architecture into one entry, that entry is folded on
 // keys alone instead. Every distinct set of architectures is one group,
 // most architectures first, then in the order the architectures were
@@ -186,35 +191,50 @@ func Fold(arches []string, items [][]Item) []Group {
 		}
 		parent[find(a)] = find(b)
 	}
-	for i := range arches {
-		for _, it := range items[i] {
-			union("k\x00"+it.Key+"\x00"+it.Tag, "r\x00"+it.Raw+"\x00"+it.Tag)
+	// Every form of an item is one handle, and all of an item's handles
+	// are joined: the key with the tag, the raw form with the raw tag, and
+	// the two cross pairs.
+	handles := func(it Item) []string {
+		rawTag := it.RawTag
+		if rawTag == "" {
+			rawTag = it.Tag
+		}
+		return []string{
+			"kt\x00" + it.Key + "\x00" + it.Tag,
+			"kr\x00" + it.Key + "\x00" + rawTag,
+			"rt\x00" + it.Raw + "\x00" + it.Tag,
+			"rr\x00" + it.Raw + "\x00" + rawTag,
 		}
 	}
-	type folded struct {
-		tag     string
-		members []member
+	for i := range arches {
+		for _, it := range items[i] {
+			h := handles(it)
+			for _, x := range h[1:] {
+				union(h[0], x)
+			}
+		}
 	}
-	byRoot := map[string]*folded{}
+	byRoot := map[string][]member{}
 	var roots []string
 	for i, a := range arches {
 		for _, it := range items[i] {
-			root := find("k\x00" + it.Key + "\x00" + it.Tag)
-			f := byRoot[root]
-			if f == nil {
-				f = &folded{tag: it.Tag}
-				byRoot[root] = f
+			root := find(handles(it)[0])
+			if byRoot[root] == nil {
 				roots = append(roots, root)
 			}
-			f.members = append(f.members, member{a, it.Key, it.Raw})
+			rawTag := it.RawTag
+			if rawTag == "" {
+				rawTag = it.Tag
+			}
+			byRoot[root] = append(byRoot[root], member{a, it.Key, it.Raw, it.Tag, rawTag})
 		}
 	}
 	var entries []struct {
 		arches []string
 		entry  Entry
 	}
-	emit := func(tag string, members []member) {
-		e := Entry{Tag: tag}
+	emit := func(members []member) {
+		var e Entry
 		var arches []string
 		for _, m := range members {
 			arches = append(arches, m.arch)
@@ -222,9 +242,15 @@ func Fold(arches []string, items [][]Item) []Group {
 			if m.key != m.raw && (e.Key == "" || m.key < e.Key) {
 				e.Key = m.key
 			}
+			if m.tag != m.rawTag && (e.Tag == "" || m.tag < e.Tag) {
+				e.Tag = m.tag
+			}
 		}
 		if e.Key == "" {
 			e.Key = members[0].raw
+		}
+		if e.Tag == "" {
+			e.Tag = members[0].rawTag
 		}
 		entries = append(entries, struct {
 			arches []string
@@ -232,22 +258,22 @@ func Fold(arches []string, items [][]Item) []Group {
 		}{arches, e})
 	}
 	for _, root := range roots {
-		f := byRoot[root]
-		if !hasTwice(f.members) {
-			emit(f.tag, f.members)
+		members := byRoot[root]
+		if !hasTwice(members) {
+			emit(members)
 			continue
 		}
 		// Keys alone, and where a key still holds one architecture twice
 		// (the x32 abi folds onto gnu), the k-th item of every
 		// architecture makes the k-th entry, so an entry never lists an
 		// architecture twice and the first ones still fold.
-		for _, byKey := range partition(f.members, func(m member) string { return m.key }) {
+		for _, byKey := range partition(members, func(m member) string { return m.key + "\x00" + m.tag }) {
 			nth := map[string]int{}
 			for _, byN := range partition(byKey, func(m member) string {
 				nth[m.arch]++
 				return strconv.Itoa(nth[m.arch])
 			}) {
-				emit(f.tag, byN)
+				emit(byN)
 			}
 		}
 	}
