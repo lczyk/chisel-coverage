@@ -356,8 +356,11 @@ func TestRunPrefix(t *testing.T) {
 	}
 	// The fake looks for <pkg>_cov-all to tell availability; keep one.
 	touch(t, filepath.Join(f.trees, "amd64", "bash_cov-all/x"))
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	touch(t, filepath.Join(shared, "sha256", "abc123"))
+	t.Setenv("FAKE_CACHE", "abc123")
 	var out strings.Builder
-	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Ignores: []string{"/usr/share/man/**"}, Whole: true, Prefix: "file", Runner: f.runner, Verbose: &out}, []string{"bash"})
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Ignores: []string{"/usr/share/man/**"}, Whole: true, Prefix: "file", Jobs: 2, Cache: shared, Runner: f.runner, Verbose: &out}, []string{"bash"})
 	assert.NoError(t, err)
 	a := res[0].Arches[0]
 	assert.That(t, a.Available)
@@ -366,6 +369,7 @@ func TestRunPrefix(t *testing.T) {
 	_, cov := a.Slices["cov-all"]
 	assert.That(t, !cov)
 	assert.ContainsString(t, out.String(), "amd64 bash_file-all 19")
+	assert.ContainsString(t, out.String(), "amd64 bash_file-cache-view 1")
 	assert.That(t, !strings.Contains(out.String(), "cov-"))
 }
 
