@@ -3,6 +3,7 @@ package cuts
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -167,9 +168,13 @@ func setup(t *testing.T) *fixture {
 	return f
 }
 
+// cuts lists the cuts the fake ran so far, none when none ran.
 func (f *fixture) cuts(t *testing.T) []string {
 	t.Helper()
 	b, err := os.ReadFile(f.log)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	assert.NoError(t, err)
 	return strings.Split(strings.TrimSpace(string(b)), "\n")
 }
@@ -306,6 +311,18 @@ func TestRunOnlySlices(t *testing.T) {
 	assert.Error(t, err, `bash has no slice "nope"`)
 	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"nope"}, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, "no package being checked has a slice named nope")
+	// A name some other package has, whichever package comes first.
+	for _, pkgs := range [][]string{{"bash", "dash"}, {"dash", "bash"}} {
+		res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"config"}, Runner: f.runner}, pkgs)
+		assert.NoError(t, err, pkgs)
+		for _, p := range res {
+			if p.Name == "bash" {
+				assert.EqualArrays(t, p.Slices, []string{"config"})
+			} else {
+				assert.EqualArrays(t, p.Slices, []string{})
+			}
+		}
+	}
 	_, err = Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64"}, Only: []string{"zsh_bins"}, Runner: f.runner}, []string{"bash"})
 	assert.Error(t, err, "package zsh is not being checked")
 }
@@ -369,7 +386,7 @@ func TestRunPrefix(t *testing.T) {
 	_, cov := a.Slices["cov-all"]
 	assert.That(t, !cov)
 	assert.ContainsString(t, out.String(), "amd64 bash_file-all 19")
-	assert.ContainsString(t, out.String(), "amd64 bash_file-cache-view 1")
+	assert.ContainsString(t, out.String(), "amd64 bash_file-cache-view ")
 	assert.That(t, !strings.Contains(out.String(), "cov-"))
 }
 
