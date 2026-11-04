@@ -14,10 +14,17 @@ import (
 
 var abi = regexp.MustCompile(`<arch>-linux-gnu[a-z0-9]*`)
 
+// extraCPUs is what names an architecture's cpu in paths besides the deb
+// spellings: ruby's RbConfig says x86 for i386.
+var extraCPUs = map[string][]string{
+	"i386": {"x86"},
+}
+
 // Normalise rewrites what names the architecture in path, so paths from
 // different architectures compare equal: the multiarch triplet becomes
 // <arch>-linux-<gnu> (the cpu part only where -linux- follows, so "arm" inside
-// "apparmor" is left alone; the abi part wherever it is, in file names too),
+// "apparmor" is left alone, in every spelling the architecture's cpu goes by;
+// the abi part wherever it is, in file names too),
 // and the architecture's own name becomes <arch> where it stands as a word,
 // as in java-21-openjdk-amd64 or README.Debian.armhf.gz.
 func Normalise(path, arch string) string {
@@ -25,7 +32,7 @@ func Normalise(path, arch string) string {
 	if cpus == nil {
 		return path
 	}
-	for _, cpu := range cpus {
+	for _, cpu := range append(cpus, extraCPUs[arch]...) {
 		path = strings.ReplaceAll(path, cpu+"-linux-", "<arch>-linux-")
 	}
 	path = abi.ReplaceAllString(path, "<arch>-linux-<gnu>")
