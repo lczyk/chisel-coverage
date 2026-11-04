@@ -111,6 +111,7 @@ type run struct {
 	start    time.Time
 	rm       sync.WaitGroup // rootfs dirs being removed in the background
 	mu       sync.Mutex
+	logMu    sync.Mutex    // the Log and Verbose writers
 	seeding  sync.Mutex    // views are seeded one at a time, see worker
 	views    []*cache.View // idle views, for the next worker
 	cuts     int           // the totals of the run, for the summary line
@@ -790,24 +791,27 @@ func (r *run) cutf(arch, slice string, res *cut.Result, err error) {
 	default:
 		what = fmt.Sprintf("%d", len(res.Paths))
 	}
-	stampf(r.opts.Verbose, "%s %s %s", arch, slice, what)
+	r.verbosef("%s %s %s", arch, slice, what)
 }
 
 // verbosef writes a line on the Verbose writer.
 func (r *run) verbosef(format string, args ...any) {
 	if r.opts.Verbose != nil {
-		stampf(r.opts.Verbose, format, args...)
+		r.stampf(r.opts.Verbose, format, args...)
 	}
 }
 
 func (r *run) logf(format string, args ...any) {
 	if r.opts.Log != nil {
-		stampf(r.opts.Log, format, args...)
+		r.stampf(r.opts.Log, format, args...)
 	}
 }
 
-// stampf writes one timestamped line in a single call, since workers log
-// concurrently. See cut.Stamp for the line format.
-func stampf(w io.Writer, format string, args ...any) {
+// stampf writes one timestamped line in a single call under the run's
+// log lock, since workers log concurrently and the writer need not be
+// safe for that. See cut.Stamp for the line format.
+func (r *run) stampf(w io.Writer, format string, args ...any) {
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
 	fmt.Fprintf(w, "%s "+format+"\n", append([]any{cut.Stamp()}, args...)...)
 }
