@@ -92,6 +92,7 @@ type prepared struct {
 	slices []string // real slices considered
 	cuts   []string // slices to cut, the lead first
 	rel    *temprelease.Release
+	only   []string // the bare --slice names asked of this package, nil for all
 }
 
 type run struct {
@@ -177,6 +178,14 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		r.prepared = append(r.prepared, p)
 		r.results = append(r.results, Package{Name: pkg, Slices: p.slices, Arches: make([]Arch, len(opts.Arches))})
 		r.cells = append(r.cells, make([]cell, len(opts.Arches)))
+	}
+	// A bare --slice name is kept only where it exists, so a package may
+	// end up with nothing to cut; that is an error only when no package
+	// being checked has any of the names.
+	for _, p := range r.prepared {
+		if len(p.only) > 0 && len(p.slices) == 0 && !r.anyExists(p.only) {
+			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(p.only, ", "))
+		}
 	}
 	r.work, err = os.MkdirTemp("", "chisel-coverage-*")
 	if err != nil {
@@ -314,9 +323,6 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 		if keep == nil {
 			keep = []string{}
 		}
-		if len(keep) == 0 && len(only) > 0 && !r.anyExists(only) {
-			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(only, ", "))
-		}
 	}
 	file, cuts, err := sdf.Synthesise(def, keep, r.opts.Ignores, r.names)
 	if err != nil {
@@ -340,7 +346,7 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 	if r.opts.Keep {
 		r.logf("release for %s: %s", pkg, rel.Dir)
 	}
-	p := &prepared{def: def, cuts: cuts, rel: rel}
+	p := &prepared{def: def, cuts: cuts, rel: rel, only: only}
 	for _, s := range def.Slices {
 		if keep == nil || slices.Contains(keep, s.Name) {
 			p.slices = append(p.slices, s.Name)
@@ -351,14 +357,10 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 
 func (r *run) prefixed(name string) bool { return slices.Contains(r.opts.Only, name) }
 
-// anyExists reports whether any of the bare names exists in some package
-// already prepared or still to come. Checked lazily: the error only matters
-// when a package ends up with nothing to cut.
+// anyExists reports whether some package being checked has a slice of one
+// of the names.
 func (r *run) anyExists(names []string) bool {
 	for _, name := range names {
-		if r.prefixed(name) {
-			continue
-		}
 		for _, p := range r.prepared {
 			if p.def.Slice(name) != nil {
 				return true
