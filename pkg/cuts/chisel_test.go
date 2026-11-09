@@ -16,7 +16,7 @@ import (
 	"github.com/lczyk/chisel-proxy/pkg/deb"
 
 	"github.com/lczyk/chisel-coverage/pkg/cut"
-	"github.com/lczyk/chisel-coverage/pkg/sdf"
+	"github.com/lczyk/chisel-coverage/pkg/packageslicesfile"
 )
 
 // TestRealChisel pins what the design assumes about chisel: that the whole-deb
@@ -112,7 +112,7 @@ slices:
 	assert.EqualArrays(t, demo.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/demo"})
 	assert.EqualArrays(t, demo.Slices["copyright"], []string{"/usr/", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/copyright"})
 	assert.EqualArrays(t, demo.Slices["scripts"], []string{})
-	assert.EqualArrays(t, demo.Slices[sdf.DefaultPrefix.All()], []string{"/usr/", "/usr/bin/", "/usr/bin/demo", "/usr/lib/", "/usr/lib/demo/", "/usr/lib/demo/plugin.so", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/README", "/usr/share/doc/demo/copyright"})
+	assert.EqualArrays(t, demo.Slices[packageslicesfile.DefaultPrefix.All()], []string{"/usr/", "/usr/bin/", "/usr/bin/demo", "/usr/lib/", "/usr/lib/demo/", "/usr/lib/demo/plugin.so", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/README", "/usr/share/doc/demo/copyright"})
 	assert.EqualArrays(t, demo.Slices["cov-ignore-0"], []string{"/usr/", "/usr/share/", "/usr/share/doc/", "/usr/share/doc/demo/", "/usr/share/doc/demo/README", "/usr/share/doc/demo/copyright"})
 	// A glob matching nothing in the package is an empty set.
 	assert.EqualArrays(t, demo.Slices["cov-ignore-1"], []string{})

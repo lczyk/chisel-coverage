@@ -24,7 +24,7 @@ import (
 
 	"github.com/lczyk/chisel-coverage/pkg/cache"
 	"github.com/lczyk/chisel-coverage/pkg/cut"
-	"github.com/lczyk/chisel-coverage/pkg/sdf"
+	"github.com/lczyk/chisel-coverage/pkg/packageslicesfile"
 )
 
 // Options configures a run.
@@ -36,9 +36,9 @@ type Options struct {
 	Whole   bool // cut the whole-deb slice too and lead with it; else the probe leads
 	// Prefix names the run's own slices (<prefix>-all, <prefix>-probe,
 	// <prefix>-ignore-<n>) in the synthesised file and the logs;
-	// sdf.DefaultPrefix when empty.
+	// packageslicesfile.DefaultPrefix when empty.
 	Prefix string
-	// Optional lets a package have no slice definition file: it is cut as if
+	// Optional lets a package have no package slices file: it is cut as if
 	// its file declared no slices, so only the whole-deb and ignore slices.
 	Optional bool
 	Keep     bool
@@ -88,7 +88,7 @@ type Package struct {
 }
 
 type prepared struct {
-	def    *sdf.Definition
+	def    *packageslicesfile.File
 	slices []string // real slices considered
 	cuts   []string // slices to cut, the lead first
 	rel    *temprelease.Release
@@ -98,7 +98,7 @@ type prepared struct {
 type run struct {
 	ctx      context.Context
 	opts     Options
-	names    sdf.Names
+	names    packageslicesfile.Names
 	work     string
 	prepared []*prepared
 	results  []Package
@@ -143,7 +143,7 @@ type worker struct {
 
 // Run cuts every package on every architecture and returns the results in
 // input order, a package given twice once. It fails up front on a bad
-// release, a bad slice definition or an unknown --slice; a failed cut is
+// release, a bad package slices file or an unknown --slice; a failed cut is
 // reported per architecture instead. When ctx is done the cuts stop, the
 // temp dirs and cache views go, and the error is ctx's.
 func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
@@ -163,9 +163,9 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{ctx: ctx, opts: opts, names: sdf.Names(opts.Prefix), jobs: Jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), done: make([]int, len(pkgs)), start: time.Now()}
+	r := &run{ctx: ctx, opts: opts, names: packageslicesfile.Names(opts.Prefix), jobs: Jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), done: make([]int, len(pkgs)), start: time.Now()}
 	if r.names == "" {
-		r.names = sdf.DefaultPrefix
+		r.names = packageslicesfile.DefaultPrefix
 	}
 	defer r.cleanup()
 	if r.jobs > 1 && opts.Cache != "" {
@@ -303,9 +303,9 @@ func resolveOnly(only, pkgs []string) (map[string][]string, error) {
 }
 
 func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, error) {
-	def, err := sdf.Read(r.opts.Release, pkg)
+	def, err := packageslicesfile.Read(r.opts.Release, pkg)
 	if errors.Is(err, fs.ErrNotExist) && r.opts.Optional {
-		def, err = &sdf.Definition{Package: pkg}, nil
+		def, err = &packageslicesfile.File{Package: pkg}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -325,7 +325,7 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 			keep = []string{}
 		}
 	}
-	file, cuts, err := sdf.Synthesise(def, keep, r.opts.Ignores, r.names)
+	file, cuts, err := packageslicesfile.Synthesise(def, keep, r.opts.Ignores, r.names)
 	if err != nil {
 		return nil, err
 	}

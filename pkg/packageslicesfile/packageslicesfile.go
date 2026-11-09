@@ -1,7 +1,7 @@
-// Package sdf reads a slice definition file down to what a .deb can answer
-// (which paths each slice claims, with their arch lists) and synthesises the
-// single-package release file the coverage cuts run against.
-package sdf
+// Package packageslicesfile reads a package slices file down to what a .deb
+// can answer (which paths each slice claims, with their arch lists) and
+// synthesises the single-package release file the coverage cuts run against.
+package packageslicesfile
 
 import (
 	"bytes"
@@ -39,8 +39,8 @@ func (n Names) Reserved(name string) bool {
 	return name == n.All() || name == n.Probe() || n.IsIgnore(name)
 }
 
-// Definition is the stripped view of a slice definition file.
-type Definition struct {
+// File is the stripped view of a package slices file.
+type File struct {
 	Package string
 	Archive string
 	Slices  []Slice // file order
@@ -59,7 +59,7 @@ type Entry struct {
 }
 
 // Slice returns the slice called name, or nil.
-func (d *Definition) Slice(name string) *Slice {
+func (d *File) Slice(name string) *Slice {
 	for i := range d.Slices {
 		if d.Slices[i].Name == name {
 			return &d.Slices[i]
@@ -77,11 +77,11 @@ type yamlPath struct {
 	Arch     yaml.Node `yaml:"arch"`
 }
 
-// Read parses the slice definition file for pkg under release and strips it:
+// Read parses the package slices file for pkg under release and strips it:
 // essentials, mutate scripts, until, generated content and attributes are
 // dropped, and a copy entry is re-keyed by its source. Only path keys and their
 // arch lists survive. See design.md for why each goes.
-func Read(release, pkg string) (*Definition, error) {
+func Read(release, pkg string) (*File, error) {
 	path := filepath.Join(release, "slices", pkg+".yaml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -97,7 +97,7 @@ func Read(release, pkg string) (*Definition, error) {
 	return d, nil
 }
 
-func parse(raw []byte) (*Definition, error) {
+func parse(raw []byte) (*File, error) {
 	var doc struct {
 		Package string    `yaml:"package"`
 		Archive string    `yaml:"archive"`
@@ -109,7 +109,7 @@ func parse(raw []byte) (*Definition, error) {
 	if doc.Package == "" {
 		return nil, fmt.Errorf("no package name")
 	}
-	d := &Definition{Package: doc.Package, Archive: doc.Archive}
+	d := &File{Package: doc.Package, Archive: doc.Archive}
 	if doc.Slices.Kind == 0 {
 		return d, nil
 	}
@@ -204,7 +204,7 @@ func mergeArch(a, b []string) []string {
 // also returns the names of the slices worth cutting: a slice with no entries
 // left is not cut, its result being empty regardless. The tool's own slices
 // are named under names; a real slice with one of their names is refused.
-func Synthesise(d *Definition, only []string, ignores []string, names Names) (file []byte, cuts []string, err error) {
+func Synthesise(d *File, only []string, ignores []string, names Names) (file []byte, cuts []string, err error) {
 	root := &yaml.Node{Kind: yaml.MappingNode}
 	root.Content = append(root.Content, str("package"), str(d.Package))
 	if d.Archive != "" {

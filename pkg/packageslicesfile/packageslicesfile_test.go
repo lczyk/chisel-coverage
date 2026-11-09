@@ -1,4 +1,4 @@
-package sdf
+package packageslicesfile
 
 import (
 	"os"
@@ -101,7 +101,7 @@ func TestReadErrors(t *testing.T) {
 }
 
 func TestSynthesise(t *testing.T) {
-	d := &Definition{Package: "bash", Archive: "ubuntu", Slices: []Slice{
+	d := &File{Package: "bash", Archive: "ubuntu", Slices: []Slice{
 		{Name: "bins", Entries: []Entry{{Path: "/usr/bin/bash"}, {Path: "/usr/lib/*/x.so", Arch: []string{"amd64"}}}},
 		{Name: "scripts"},
 		{Name: "copyright", Entries: []Entry{{Path: "/usr/share/doc/bash/copyright"}}},
