@@ -19,7 +19,7 @@ import (
 
 	"github.com/lczyk/chisel-coverage/pkg/cache"
 	"github.com/lczyk/chisel-coverage/pkg/cut"
-	"github.com/lczyk/chisel-coverage/pkg/sdf"
+	"github.com/lczyk/chisel-coverage/pkg/packageslicesfile"
 )
 
 // fakeChisel fills --root from $FAKE_TREES/<arch>/<slice>/. A package with no
@@ -204,8 +204,8 @@ func TestRunCuts(t *testing.T) {
 	assert.Equal(t, amd64.Version, "5.2-1")
 	assert.Equal(t, amd64.DebArch, "amd64")
 	assert.Equal(t, amd64.StandIn, "")
-	assert.Len(t, amd64.Slices[sdf.DefaultPrefix.All()], 19)
-	assert.ContainsString(t, strings.Join(amd64.Slices[sdf.DefaultPrefix.All()], "\n"), "/usr/lib/x86_64-linux-gnu/bash/loadables.so")
+	assert.Len(t, amd64.Slices[packageslicesfile.DefaultPrefix.All()], 19)
+	assert.ContainsString(t, strings.Join(amd64.Slices[packageslicesfile.DefaultPrefix.All()], "\n"), "/usr/lib/x86_64-linux-gnu/bash/loadables.so")
 	assert.EqualArrays(t, amd64.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/bash", "/usr/bin/rbash"})
 	assert.EqualArrays(t, amd64.Slices["config"], []string{"/etc/", "/etc/skel/", "/etc/skel/.bashrc"})
 	// Cut, but the fake has no tree for it: empty.
@@ -217,7 +217,7 @@ func TestRunCuts(t *testing.T) {
 	// A glob matching nothing is an empty set, not a failure.
 	assert.EqualArrays(t, amd64.Slices["cov-ignore-2"], []string{})
 	assert.Len(t, amd64.Slices, 1+4+3)
-	_, probed := amd64.Slices[sdf.DefaultPrefix.Probe()]
+	_, probed := amd64.Slices[packageslicesfile.DefaultPrefix.Probe()]
 	assert.That(t, !probed)
 
 	i386 := p.Arches[1]
@@ -228,7 +228,7 @@ func TestRunCuts(t *testing.T) {
 
 	arm64 := p.Arches[2]
 	assert.That(t, arm64.Available)
-	assert.ContainsString(t, strings.Join(arm64.Slices[sdf.DefaultPrefix.All()], "\n"), "/usr/lib/aarch64-linux-gnu/bash/loadables.so")
+	assert.ContainsString(t, strings.Join(arm64.Slices[packageslicesfile.DefaultPrefix.All()], "\n"), "/usr/lib/aarch64-linux-gnu/bash/loadables.so")
 
 	cuts := f.cuts(t)
 	assert.That(t, !strings.Contains(strings.Join(cuts, "\n"), "bash_scripts"))
@@ -258,9 +258,9 @@ func TestRunProbeLeads(t *testing.T) {
 	assert.That(t, amd64.Available)
 	assert.Equal(t, amd64.Version, "5.2-1")
 	assert.Equal(t, amd64.DebArch, "amd64")
-	_, whole := amd64.Slices[sdf.DefaultPrefix.All()]
+	_, whole := amd64.Slices[packageslicesfile.DefaultPrefix.All()]
 	assert.That(t, !whole)
-	_, probed := amd64.Slices[sdf.DefaultPrefix.Probe()]
+	_, probed := amd64.Slices[packageslicesfile.DefaultPrefix.Probe()]
 	assert.That(t, !probed)
 	assert.Len(t, amd64.Slices, 4+1)
 	assert.EqualArrays(t, amd64.Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/bash", "/usr/bin/rbash"})
@@ -345,7 +345,7 @@ func TestRunCutFailureIsPerArch(t *testing.T) {
 	}
 }
 
-func TestRunOptionalSDF(t *testing.T) {
+func TestRunOptionalPackageSlicesFile(t *testing.T) {
 	f := setup(t)
 	touch(t, filepath.Join(f.trees, "amd64", "zsh_cov-all/usr/bin/zsh"))
 	touch(t, filepath.Join(f.trees, "amd64", "zsh_cov-ignore-0/usr/bin/zsh"))
@@ -354,7 +354,7 @@ func TestRunOptionalSDF(t *testing.T) {
 	zsh := res[0]
 	assert.Len(t, zsh.Slices, 0)
 	assert.That(t, zsh.Arches[0].Available)
-	assert.EqualArrays(t, zsh.Arches[0].Slices[sdf.DefaultPrefix.All()], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
+	assert.EqualArrays(t, zsh.Arches[0].Slices[packageslicesfile.DefaultPrefix.All()], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
 	assert.EqualArrays(t, zsh.Arches[0].Slices["cov-ignore-0"], []string{"/usr/", "/usr/bin/", "/usr/bin/zsh"})
 	assert.Len(t, zsh.Arches[0].Slices, 2)
 	assert.EqualArrays(t, res[1].Slices, []string{"config", "bins", "copyright", "scripts"})
@@ -511,7 +511,7 @@ func TestRunArchAllPackagesAreProbed(t *testing.T) {
 	assert.Equal(t, dash.Arches[1].StandIn, "amd64")
 	assert.Equal(t, dash.Arches[0].StandIn, "")
 	assert.EqualArrays(t, dash.Arches[1].Slices["bins"], dash.Arches[0].Slices["bins"])
-	assert.EqualArrays(t, dash.Arches[1].Slices[sdf.DefaultPrefix.All()], dash.Arches[0].Slices[sdf.DefaultPrefix.All()])
+	assert.EqualArrays(t, dash.Arches[1].Slices[packageslicesfile.DefaultPrefix.All()], dash.Arches[0].Slices[packageslicesfile.DefaultPrefix.All()])
 	assert.That(t, !dash.Arches[2].Available)
 }
 

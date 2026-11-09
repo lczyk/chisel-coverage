@@ -130,7 +130,7 @@ func TestBashCoverage(t *testing.T) {
 		t.Fatalf("man page not ignored:\n%s", out)
 	}
 	if len(a.Uncovered) == 0 {
-		t.Fatalf("bash has nothing uncovered, which is not what its sdf says:\n%s", out)
+		t.Fatalf("bash has nothing uncovered, which is not what its package slices file says:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(release, "slices", "bash.yaml")); err != nil {
 		t.Fatalf("the checkout was modified: %v", err)
