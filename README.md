@@ -7,11 +7,11 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/lczyk/chisel-coverage.svg)](https://pkg.go.dev/github.com/lczyk/chisel-coverage)
 [![lint_and_test](https://github.com/lczyk/chisel-coverage/actions/workflows/lint_and_test.yml/badge.svg)](https://github.com/lczyk/chisel-coverage/actions/workflows/lint_and_test.yml)
 
-development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its slice definition file leaves out, per architecture.
+development tool for [chisel-releases](https://github.com/canonical/chisel-releases) work. for a package, it reports which paths of the `.deb` its package slices file leaves out, per architecture.
 
 ## why
 
-when writing or reviewing a slice definition we want to know what we might have left out. this is a pain to do by hand, especially on every arch.
+when writing or reviewing a package slices file we want to know what we might have left out. this is a pain to do by hand, especially on every arch.
 
 ## use
 
@@ -45,11 +45,11 @@ every entry of the deb counts, directories included. a directory is covered once
 
 several packages can be given at once, and all cuts run in parallel. jobs get work at slice-level granularity. one job per cpu by default (`--jobs=-1`) and each job is set up with a private view of the cache so concurrent cuts dont clobber one-anothe's caches. `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`.
 
-you can add paths to `--ignore`. the syntax is identical to chisel's SDFs since that's what ignore is doing under the hood. in fact, this entire tool is written using pattented (not really) [`chisel-proxy`](https://github.com/lczyk/chisel-proxy) technology. `--ignore` only ever shrinks the uncovered set so a covered path that matches an ignore stays covered.
+you can add paths to `--ignore`. the syntax is identical to chisel's package slices files since that's what ignore is doing under the hood. in fact, this entire tool is written using pattented (not really) [`chisel-proxy`](https://github.com/lczyk/chisel-proxy) technology. `--ignore` only ever shrinks the uncovered set so a covered path that matches an ignore stays covered.
 
 ## how it works ?
 
-chisel does the work. for each package the tool writes a throwaway release holding `chisel.yaml` and a single slice definition (that's the `chisel-proxy` tech). the package's own slices are tehn stipped of from essentials, mutate scripts, `text` / `symlink` / `make` / `generate` entries etc, and `copy` entries are keyed by their source. extra slice (`cov-all`) with `/**` is also added to get the content of the entie deb, to compare. ignore globs are also extra slices. every slice is then `cut` to get the content of its rootffs.
+chisel does the work. for each package the tool writes a throwaway release holding `chisel.yaml` and a single package slices file (that's the `chisel-proxy` tech). the package's own slices are tehn stipped of from essentials, mutate scripts, `text` / `symlink` / `make` / `generate` entries etc, and `copy` entries are keyed by their source. extra slice (`cov-all`) with `/**` is also added to get the content of the entie deb, to compare. ignore globs are also extra slices. every slice is then `cut` to get the content of its rootffs.
 
 so archive selection, suites, priorities, pro archives, signatures, `arch:` lists and glob semantics are all whatever the particular chisel binary does. the cache is chisel's own too. 
 
@@ -58,7 +58,7 @@ so archive selection, suites, priorities, pro archives, signatures, `arch:` list
 the building blocks are importable as `github.com/lczyk/chisel-coverage/pkg`, a module of its own:
 
 - `pkg/cuts` -- cut every slice of every package on every architecture, scheduled so concurrent chisels never share a writable cache, and get each rootfs listing back.
-- `pkg/sdf`, `pkg/cut`, `pkg/cache`, `pkg/release` -- the pieces it is made of: slice definitions stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, `--release` resolution.
+- `pkg/packageslicesfile`, `pkg/cut`, `pkg/cache`, `pkg/release` -- the pieces it is made of: package slices files stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, `--release` resolution.
 - `pkg/fold` -- normalise what names the architecture in a path, and fold architectures on what they share.
 
 ```shell

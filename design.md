@@ -8,22 +8,22 @@ this file is a working note for the first implementation. it goes away once the 
 
 chisel does all the work. the tool never reads an archive, verifies a signature, parses a `Packages` index, extracts a `.deb` or matches a glob. every one of those is a `chisel cut` against a throwaway release, and the tool only walks the resulting rootfs directories and does set arithmetic. whatever chisel binary runs is the one whose semantics apply, which is the point: run it with the chisel under test.
 
-the python prototype (`thething-2`) fetched debs itself and matched sdf globs with its own glob code. both are gone.
+the python prototype (`thething-2`) fetched debs itself and matched package slices file globs with its own glob code. both are gone.
 
 ## how it works
 
 for each package:
 
 1. read `<release>/chisel.yaml` verbatim and `<release>/slices/<package>.yaml`. `--release` is a checkout, or a release name like `ubuntu-24.04`: then chisel fetches it (`chisel find --release <name>` with a query matching nothing, so chisel's own etag check refreshes its copy) and the copy under `~/.cache/chisel/releases/<name>` is read; when chisel cannot reach github and the copy exists, the copy serves with a notice. nothing of chisel's fetching is reimplemented, only its cache layout is relied on.
-2. synthesise one sdf holding, for the same package:
+2. synthesise one package slices file holding, for the same package:
     - `cov-all` with a single entry `/**` -- the whole deb.
     - every real slice, stripped (see below). with `--slice`, only those.
     - one `cov-ignore-<n>` per `--ignore` glob, when any.
     - `cov-probe`, empty: its cut only says whether the package exists for an architecture.
 
     globs in one package never conflict with each other or with explicit paths of that package, so all of this is one file.
-3. write a throwaway release: the original `chisel.yaml` plus that one sdf, via `chisel-proxy/pkg/temp-release`.
-4. per architecture, run `chisel cut --release <tmp> --root <dir> --arch <a> --ignore unmaintained --ignore unstable <package>_<slice>` once per slice in the synthesised sdf. walk each rootfs into a set of paths (files, symlinks and directories, directories with a trailing slash, root itself excluded), then delete the rootfs.
+3. write a throwaway release: the original `chisel.yaml` plus that one package slices file, via `chisel-proxy/pkg/temp-release`.
+4. per architecture, run `chisel cut --release <tmp> --root <dir> --arch <a> --ignore unmaintained --ignore unstable <package>_<slice>` once per slice in the synthesised package slices file. walk each rootfs into a set of paths (files, symlinks and directories, directories with a trailing slash, root itself excluded), then delete the rootfs.
 5. arithmetic per architecture:
     - `all` = the `cov-all` set
     - `covered` = union of the real slices' sets
@@ -40,11 +40,11 @@ the synthesised slices keep only what the deb can answer: the path keys, with th
 
 - package- and slice-level `essential` -- other packages are not this deb.
 - `mutate` and `until` -- a path removed after mutation is still declared, so it counts as covered.
-- `text`, `symlink`, `make: true`, `generate` -- generated content, not deb content. a deb directory the sdf creates with `make: true` is reported uncovered; that is rare and the honest answer.
+- `text`, `symlink`, `make: true`, `generate` -- generated content, not deb content. a deb directory the package slices file creates with `make: true` is reported uncovered; that is rare and the honest answer.
 - `mode`, `mutable`, `prefer` -- attributes, no effect on which deb paths are claimed.
 - `copy: <src>` -- the entry is re-keyed by `<src>` so the deb path gets the credit.
 
-`archive:` is kept, so a pinned package is cut from the archive the sdf names.
+`archive:` is kept, so a pinned package is cut from the archive the package slices file names.
 
 ### directories
 
@@ -103,7 +103,7 @@ flags are parsed by go-flags, the library chisel uses, so `--flag=value`, `--fla
 
 ## report
 
-text, to stdout, one block per group. architectures of the same version and availability are folded on what their debs ship: every path is keyed by the architectures whose deb has it, and each key is a block with the counts of those paths alone, so there are no ranges and an architecture's blocks sum to its deb. openjdk-17-jdk-headless on 26.04: 133 paths on all seven, 3 more on all but s390x (the serviceability agent), 1 more on armhf, i386 and riscv64 (its jmod). most architectures first. a path a slice takes on some architectures only (sdf `arch:`) is keyed with its state too, so it is covered in one block and uncovered in another (openjdk's agent jmod: covered on amd64, arm64 and ppc64el, uncovered on armhf, i386 and riscv64). paths are compared after normalising what names the architecture: every word of the path that is the architecture's becomes `<arch>` (its own name, the cpu of its multiarch triplet, and what java, go, dotnet, libunwind and ruby call it: `x86_64-linux-gnu`, `java-21-openjdk-amd64`, `jre/lib/aarch64`, `linux_386`, `linux-x64`, `libunwind-ppc64.so.8`, `x86-linux-gnu`, `binutils-x86-64-linux-gnu`, `README.Debian.armhf.gz`), and the abi part of a triplet becomes `<gnu>`, in file names too, so `perl5.40-arm-linux-gnueabihf.1.gz` folds. a word is bounded by anything but a letter or digit (`arm` inside `apparmor` stays) and another architecture's word is left alone (`x86_64` on i386). two paths fold when their normalised forms are equal or their raw forms are, transitively, so a path that is the same word for word on every architecture (`cmd/compile/internal/arm/` in golang-src, `/usr/bin/aarch64-linux-gnu-gcc` in a cross compiler) folds whatever normalising made of it on one of them, and a spelling in the table can only ever merge, never split. what must agree beside the path (a state here, a description in chisel-file) folds the same way, on its normalised or its raw form, so a symlink target that is one word for word everywhere (binutils' `aarch64-linux-gnu-ld.bfd` on four architectures) is one entry even where normalising rewrote it on one of them. that is what lets `x86` be amd64's word as well as i386's: the kernel headers' `arch/x86` folds on both, and the raw union keeps anything it would split together. when both ways would put two paths of one architecture in one entry, the normalised forms alone decide, and where one normalised form still holds an architecture twice (`x86_64-linux-gnux32` folds onto `gnu`) the k-th path of every architecture makes the k-th entry, so no entry lists an architecture twice. entries are sorted by what is shown, the raw path when every architecture agrees on it. errors and "not available" are never grouped with results. a block of one architecture shows its real paths, not the folded ones, and `--no-group` makes every architecture one whole block.
+text, to stdout, one block per group. architectures of the same version and availability are folded on what their debs ship: every path is keyed by the architectures whose deb has it, and each key is a block with the counts of those paths alone, so there are no ranges and an architecture's blocks sum to its deb. openjdk-17-jdk-headless on 26.04: 133 paths on all seven, 3 more on all but s390x (the serviceability agent), 1 more on armhf, i386 and riscv64 (its jmod). most architectures first. a path a slice takes on some architectures only (`arch:` in the package slices file) is keyed with its state too, so it is covered in one block and uncovered in another (openjdk's agent jmod: covered on amd64, arm64 and ppc64el, uncovered on armhf, i386 and riscv64). paths are compared after normalising what names the architecture: every word of the path that is the architecture's becomes `<arch>` (its own name, the cpu of its multiarch triplet, and what java, go, dotnet, libunwind and ruby call it: `x86_64-linux-gnu`, `java-21-openjdk-amd64`, `jre/lib/aarch64`, `linux_386`, `linux-x64`, `libunwind-ppc64.so.8`, `x86-linux-gnu`, `binutils-x86-64-linux-gnu`, `README.Debian.armhf.gz`), and the abi part of a triplet becomes `<gnu>`, in file names too, so `perl5.40-arm-linux-gnueabihf.1.gz` folds. a word is bounded by anything but a letter or digit (`arm` inside `apparmor` stays) and another architecture's word is left alone (`x86_64` on i386). two paths fold when their normalised forms are equal or their raw forms are, transitively, so a path that is the same word for word on every architecture (`cmd/compile/internal/arm/` in golang-src, `/usr/bin/aarch64-linux-gnu-gcc` in a cross compiler) folds whatever normalising made of it on one of them, and a spelling in the table can only ever merge, never split. what must agree beside the path (a state here, a description in chisel-file) folds the same way, on its normalised or its raw form, so a symlink target that is one word for word everywhere (binutils' `aarch64-linux-gnu-ld.bfd` on four architectures) is one entry even where normalising rewrote it on one of them. that is what lets `x86` be amd64's word as well as i386's: the kernel headers' `arch/x86` folds on both, and the raw union keeps anything it would split together. when both ways would put two paths of one architecture in one entry, the normalised forms alone decide, and where one normalised form still holds an architecture twice (`x86_64-linux-gnux32` folds onto `gnu`) the k-th path of every architecture makes the k-th entry, so no entry lists an architecture twice. entries are sorted by what is shown, the raw path when every architecture agrees on it. errors and "not available" are never grouped with results. a block of one architecture shows its real paths, not the folded ones, and `--no-group` makes every architecture one whole block.
 
 ```
 bash 5.2.21-2ubuntu4 [amd64, arm64]
@@ -128,11 +128,11 @@ mirrors chisel-proxy: `cmd/`, `internal/{cli,coverage}`, a library module under 
 
 the library is `github.com/lczyk/chisel-coverage/pkg`, a module of its own tagged `pkg/vX.Y.Z`, so sister tools (chisel-file, chisel-elftree) drive chisel the same way without copying the pool:
 
-- `pkg/sdf` -- read an sdf, strip, synthesise.
+- `pkg/packageslicesfile` -- read a package slices file, strip, synthesise.
 - `pkg/cut` -- run one chisel cut, classify its failure, read the version line, walk a rootfs.
 - `pkg/cache` -- private views of chisel's cache for concurrent cuts.
 - `pkg/release` -- `--release` as a checkout or a release name fetched by chisel and read from its cache.
-- `pkg/cuts` -- the worker pool: every slice of every package on every architecture, the lead and probe phases, the views, the worker sizing. a caller gets each slice's paths per architecture, and a `Visit` hook sees every cut while its rootfs still exists. `Only` nil considers every slice, empty none. `Prefix` names the run's own slices, `cov` by default, so another tool's `-v` lines and temp releases say whose they are. with `Optional` a package without a slice definition file is cut as if it declared no slices, so a deb can be listed before any sdf exists. with `Whole` the whole-deb slice is cut and leads; without it the empty probe leads, since chisel fetches the deb for an empty slice too and so still reports availability, version and deb architecture.
+- `pkg/cuts` -- the worker pool: every slice of every package on every architecture, the lead and probe phases, the views, the worker sizing. a caller gets each slice's paths per architecture, and a `Visit` hook sees every cut while its rootfs still exists. `Only` nil considers every slice, empty none. `Prefix` names the run's own slices, `cov` by default, so another tool's `-v` lines and temp releases say whose they are. with `Optional` a package without a package slices file is cut as if it declared no slices, so a deb can be listed before any package slices file exists. with `Whole` the whole-deb slice is cut and leads; without it the empty probe leads, since chisel fetches the deb for an empty slice too and so still reports availability, version and deb architecture.
 - `pkg/fold` -- path normalisation and the folding of architectures on what they share, keyed by whatever the caller says must agree.
 
 the binary's own packages:
@@ -145,7 +145,7 @@ deps: `github.com/jessevdk/go-flags` (what chisel uses), `gopkg.in/yaml.v3`, `gi
 ## testing
 
 - unit tests with a fake `chisel` script that populates `--root` from the slice name. one of them takes a per-architecture lock in the fake and fails if two cuts overlap with `-j 1`; another has the fake behave like chisel's cache and checks every cut ran in a view and every blob came back.
-- an integration test with the real `chisel` against an in-memory signed archive (`chisel-proxy/pkg/apt`) of handmade debs, reached through `http_proxy` and a throwaway `XDG_CACHE_HOME`. this pins the chisel assumptions above (globs coexisting in one sdf, implicit parents, the ignore slices, `no content`) offline. skipped when `chisel` is not found.
+- an integration test with the real `chisel` against an in-memory signed archive (`chisel-proxy/pkg/apt`) of handmade debs, reached through `http_proxy` and a throwaway `XDG_CACHE_HOME`. this pins the chisel assumptions above (globs coexisting in one package slices file, implicit parents, the ignore slices, `no content`) offline. skipped when `chisel` is not found.
 - `e2e/` against the real archive and a real chisel-releases clone, behind `-tags e2e` and `CHISEL_COVERAGE_E2E=1`.
 
 ## carried over from the prototype
@@ -158,5 +158,5 @@ the prototype grew three speedups shortly before this rewrite. none needs code h
 
 ## later, maybe
 
-- a `--real` mode cutting the slices against the untouched release, essentials and mutate included, for "what does a real cut produce" rather than "what does the sdf declare".
+- a `--real` mode cutting the slices against the untouched release, essentials and mutate included, for "what does a real cut produce" rather than "what does the package slices file declare".
 - once canonical/chisel#340 lands, views are only a bandwidth saver and the lead phase can go.
