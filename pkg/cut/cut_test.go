@@ -66,20 +66,78 @@ func TestCutClassifiesFailures(t *testing.T) {
 	_, err := r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	assert.ErrorIs(t, err, ErrNotAvailable)
 
+	assert.Equal(t, err.Error(), ErrNotAvailable.Error())
+	var ce *Error
+	assert.That(t, errors.As(err, &ce))
+	assert.Equal(t, ce.Package, "demo")
+	// Chisel's other wording, for a package one archive was asked for.
+	t.Setenv("FAKE_SAYS", `error: cannot find package "demo" in archive`)
+	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	assert.ErrorIs(t, err, ErrNotAvailable)
+
 	// The same text about another package is not this package's absence.
 	t.Setenv("FAKE_SAYS", `error: cannot find package "libc6" in archive(s)`)
 	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
-	var ce *Error
+	assert.That(t, !errors.Is(err, ErrNotAvailable))
+	assert.ErrorIs(t, err, ErrEssentialNotAvailable)
 	assert.That(t, errors.As(err, &ce))
+	assert.Equal(t, ce.Package, "libc6")
 	assert.Equal(t, ce.Args[1], "cut")
 	assert.EqualArrays(t, ce.Args[len(ce.Args)-6:], []string{"amd64", "--ignore", "unmaintained", "--ignore", "unstable", "demo_bins"})
-	assert.ContainsString(t, err.Error(), "exit status 1\n  error: cannot find package")
+	assert.ContainsString(t, err.Error(), "not available for this architecture\n  error: cannot find package")
 
 	t.Setenv("FAKE_SAYS", `error: cannot extract from package "demo": no content at /usr/share/man/**`)
 	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
 	assert.ErrorIs(t, err, ErrNoContent)
 	assert.That(t, errors.As(err, &ce))
 	assert.ContainsString(t, err.Error(), "matched nothing\n  error: cannot extract")
+	assert.Equal(t, ce.Package, "demo")
+	assert.EqualArrays(t, ce.Paths, []string{"/usr/share/man/**"})
+
+	// Several paths come as a list, and the package may be one the slice
+	// reaches.
+	t.Setenv("FAKE_SAYS", "error: cannot extract from package \"libc6\": no content at:\n- /a\n- /b/**\nnot a path")
+	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	assert.ErrorIs(t, err, ErrNoContent)
+	assert.That(t, errors.As(err, &ce))
+	assert.Equal(t, ce.Package, "libc6")
+	assert.EqualArrays(t, ce.Paths, []string{"/a", "/b/**"})
+
+	// A hard link with no target names the target, which no slice asked for.
+	t.Setenv("FAKE_SAYS", `error: cannot extract from package "demo": cannot create hard link /usr/bin/a: no content at /usr/bin/b`)
+	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	assert.That(t, !errors.Is(err, ErrNoContent))
+	assert.ContainsString(t, err.Error(), "exit status 1\n  error: cannot extract")
+
+	// An archive chisel skipped is told with any failure, and once.
+	t.Setenv("FAKE_SAYS", "Archive \"esm-apps\" ignored: credentials not found\nArchive \"esm-infra\" ignored: credentials not found\nArchive \"esm-apps\" ignored: credentials not found\nerror: cannot find package \"demo\" in archive(s)")
+	_, err = r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	assert.ErrorIs(t, err, ErrNotAvailable)
+	assert.That(t, errors.As(err, &ce))
+	assert.EqualArrays(t, ce.Skipped, []string{"esm-apps", "esm-infra"})
+}
+
+func TestCutReportsDebsAndSkippedArchives(t *testing.T) {
+	r := fake(t)
+	t.Setenv("FAKE_CODE", "0")
+	t.Setenv("FAKE_SAYS", "Archive \"esm-apps\" ignored: credentials not found\nFetching pool/main/g/glibc/libc6_2.39-0ubuntu8_amd64.deb...\nFetching pool/main/d/demo/demo_2.0_all.deb...")
+	res, err := r.Cut(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins")
+	assert.NoError(t, err)
+	assert.Equal(t, res.Version, "2.0")
+	assert.Equal(t, res.DebArch, "all")
+	assert.EqualArrays(t, res.Debs, []Deb{{"libc6", "2.39-0ubuntu8", "amd64"}, {"demo", "2.0", "all"}})
+	assert.EqualArrays(t, res.Skipped, []string{"esm-apps"})
+}
+
+func TestCutAsLabelsTheStreamedLines(t *testing.T) {
+	r := fake(t)
+	var out bytes.Buffer
+	r.Verbose = &out
+	t.Setenv("FAKE_CODE", "0")
+	t.Setenv("FAKE_SAYS", "one")
+	_, err := r.CutAs(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "arm64", "demo_bins", "demo_bins@base")
+	assert.NoError(t, err)
+	assert.Equal(t, stamped.ReplaceAllString(out.String(), ""), "arm64 demo_bins@base one\n")
 }
 
 // stamped matches the timestamp every logged line starts with.

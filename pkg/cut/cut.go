@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,7 +31,7 @@ func Binary() string {
 
 // Runner runs chisel. Verbose, when set, receives every chisel's output as it
 // happens, each line as "<stamp> <arch> <slice> <text>" with chisel's own
-// timestamp stripped. CacheHome, when set, is the XDG_CACHE_HOME chisel runs
+// timestamp stripped, <slice> being the label where CutAs gives one. CacheHome, when set, is the XDG_CACHE_HOME chisel runs
 // with, so a private view of the cache can stand in for the shared one.
 type Runner struct {
 	Bin       string
@@ -38,30 +39,55 @@ type Runner struct {
 	CacheHome string
 }
 
+// Deb is a package a cut fetched, read from chisel's Fetching line.
+type Deb struct {
+	Name    string
+	Version string // without the epoch, which the pool filename drops
+	Arch    string // "all" or the architecture
+}
+
 // Result is a successful cut.
 type Result struct {
 	Paths   []string // sorted; "/" excluded; directories end in "/"
 	Bytes   int64    // of the regular files among them
-	Version string   // from chisel's Fetching line, "" when not seen
+	Version string   // of the slice's own package, "" when its Fetching line was not seen
 	DebArch string   // "all" or the architecture, from the same line
+	Debs    []Deb    // every package fetched, the slice's own and the ones it reaches, in log order
+	Skipped []string // the archives chisel ignored for want of credentials
 }
 
-// ErrNotAvailable means chisel found no such package for the architecture.
+// ErrNotAvailable is the cause of an *Error when chisel found no such package
+// for the architecture, the package being the slice's own.
 var ErrNotAvailable = errors.New("package not available for this architecture")
 
-// ErrNoContent is the cause of an *Error when a path or glob of the slice
-// matched nothing in the package, which chisel refuses.
+// ErrEssentialNotAvailable is the cause of an *Error when the package chisel
+// did not find is not the slice's own but one it reaches through an essential.
+var ErrEssentialNotAvailable = errors.New("a package the slice depends on is not available for this architecture")
+
+// ErrNoContent is the cause of an *Error when paths or globs of a slice
+// matched nothing in their package, which chisel refuses.
 var ErrNoContent = errors.New("a path of the slice matched nothing")
 
-// Error is a cut that failed for any other reason. It carries what a user needs
-// to re-run it by hand.
+// Error is a cut that failed. It carries what a user needs to re-run it by
+// hand and, for the causes above, what chisel named.
 type Error struct {
 	Args   []string
 	Output string
 	Err    error
+	// Package is the package chisel named: the missing one for the two
+	// not-available causes, the one that lacks the paths for ErrNoContent.
+	Package string
+	Paths   []string // with ErrNoContent, the paths and globs that matched nothing
+	Skipped []string // the archives chisel ignored for want of credentials
 }
 
+// Error reads as the command, the cause and chisel's output. A missing
+// package of the slice's own reads as the cause alone, since the rest only
+// says the same.
 func (e *Error) Error() string {
+	if e.Err == ErrNotAvailable {
+		return e.Err.Error()
+	}
 	out := strings.TrimRight(e.Output, "\n")
 	if out != "" {
 		out = "\n  " + strings.ReplaceAll(out, "\n", "\n  ")
@@ -75,43 +101,95 @@ func (e *Error) Unwrap() error { return e.Err }
 // epoch from it, so the version here has none either.
 var fetching = regexp.MustCompile(`Fetching (?:\S*/)?([^/_\s]+)_([^/_\s]+)_([^/_\s.]+)\.deb\.\.\.`)
 
+// What chisel says of a package no archive has. It words it two ways, "in
+// archive" when one archive was asked and "in archive(s)" when none had it.
+var notFound = regexp.MustCompile(`cannot find package "([^"]+)" in archive(?:\(s\))?`)
+
+// What chisel says of paths that matched nothing: one on the same line, or
+// several as a list on the lines below. A hard link whose target is missing
+// is worded "cannot create hard link <link>: no content at <target>" and is
+// not this.
+var noContent = regexp.MustCompile(`(?m)cannot extract from package "([^"]+)": no content at(?::| (.+))$`)
+
+var ignored = regexp.MustCompile(`Archive "([^"]+)" ignored: credentials not found`)
+
 // Cut runs "chisel cut" for slice (<package>_<name>) of release on arch into
 // root, which it creates, and walks the result. Maintenance status is always
-// ignored so an old or devel release still cuts. A missing package for the
-// architecture is ErrNotAvailable; any other failure is an *Error, wrapping
-// ErrNoContent when a path of the slice matched nothing. When ctx is done
-// chisel is interrupted and the cut fails.
+// ignored so an old or devel release still cuts. A failure is an *Error,
+// with ErrNotAvailable, ErrEssentialNotAvailable or ErrNoContent as its
+// cause when chisel said as much. When ctx is done chisel is interrupted and
+// the cut fails.
 func (r *Runner) Cut(ctx context.Context, release, root, arch, slice string) (*Result, error) {
+	return r.CutAs(ctx, release, root, arch, slice, slice)
+}
+
+// CutAs is Cut with the lines Verbose receives carrying label in place of
+// the slice, for telling apart two cuts of one slice and architecture.
+func (r *Runner) CutAs(ctx context.Context, release, root, arch, slice, label string) (*Result, error) {
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, err
 	}
 	args := []string{"cut", "--release", release, "--root", root, "--arch", arch,
 		"--ignore", "unmaintained", "--ignore", "unstable", slice}
-	cmd, out := r.command(ctx, args, arch+" "+slice+" ")
+	cmd, out := r.command(ctx, args, arch+" "+label+" ")
+	pkg, _, _ := strings.Cut(slice, "_")
 	if err := cmd.Run(); err != nil {
-		pkg, _, _ := strings.Cut(slice, "_")
-		if strings.Contains(out.String(), fmt.Sprintf("cannot find package %q in archive", pkg)) {
-			return nil, ErrNotAvailable
+		e := &Error{Args: append([]string{r.Bin}, args...), Output: out.String(), Err: err, Skipped: skipped(out.String())}
+		if m := notFound.FindStringSubmatch(e.Output); m != nil {
+			e.Package, e.Err = m[1], ErrEssentialNotAvailable
+			if m[1] == pkg {
+				e.Err = ErrNotAvailable
+			}
+		} else if from, paths := missing(e.Output); from != "" {
+			e.Package, e.Paths, e.Err = from, paths, ErrNoContent
 		}
-		if strings.Contains(out.String(), fmt.Sprintf("cannot extract from package %q: no content at ", pkg)) {
-			err = ErrNoContent
-		}
-		return nil, &Error{Args: append([]string{r.Bin}, args...), Output: out.String(), Err: err}
+		return nil, e
 	}
 
 	paths, bytes, err := Walk(root)
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Paths: paths, Bytes: bytes}
-	pkg, _, _ := strings.Cut(slice, "_")
+	res := &Result{Paths: paths, Bytes: bytes, Skipped: skipped(out.String())}
 	for _, m := range fetching.FindAllStringSubmatch(out.String(), -1) {
-		if m[1] == pkg {
+		res.Debs = append(res.Debs, Deb{Name: m[1], Version: m[2], Arch: m[3]})
+		if m[1] == pkg && res.Version == "" {
 			res.Version, res.DebArch = m[2], m[3]
-			break
 		}
 	}
 	return res, nil
+}
+
+// missing is the package and the paths of chisel's "no content" failure, in
+// either of its forms; an empty package when the output holds none.
+func missing(output string) (pkg string, paths []string) {
+	m := noContent.FindStringSubmatchIndex(output)
+	if m == nil {
+		return "", nil
+	}
+	pkg = output[m[2]:m[3]]
+	if m[4] >= 0 {
+		return pkg, []string{output[m[4]:m[5]]}
+	}
+	for _, line := range strings.Split(output[m[1]:], "\n")[1:] {
+		path, ok := strings.CutPrefix(line, "- ")
+		if !ok {
+			break
+		}
+		paths = append(paths, path)
+	}
+	return pkg, paths
+}
+
+// skipped is the archives chisel said it ignored, each once, in log order.
+func skipped(output string) []string {
+	var names []string
+	for _, m := range ignored.FindAllStringSubmatch(output, -1) {
+		if !slices.Contains(names, m[1]) {
+			names = append(names, m[1])
+		}
+	}
+	return names
 }
 
 // Fetch has chisel fetch, or refresh, the release named name into its own
