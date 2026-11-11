@@ -45,6 +45,11 @@ func TestParseArgs(t *testing.T) {
 	assert.Equal(t, f.Release, ".")
 	assert.Nil(t, f.Arches)
 
+	// A package may be named by the path of its file.
+	_, pkgs, err = parseArgs([]string{"slices/bash.yaml", "../rel/slices/extra/dash.yaml", "zsh"}, io.Discard)
+	assert.NoError(t, err)
+	assert.EqualArrays(t, pkgs, []string{"bash", "dash", "zsh"})
+
 	_, _, err = parseArgs([]string{"--arch"}, io.Discard)
 	assert.Error(t, err, "expected argument for flag `--arch'")
 	_, _, err = parseArgs([]string{"--nope", "bash"}, io.Discard)

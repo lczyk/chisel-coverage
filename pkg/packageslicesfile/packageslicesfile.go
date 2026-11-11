@@ -77,6 +77,16 @@ type yamlPath struct {
 	Arch     yaml.Node `yaml:"arch"`
 }
 
+// Package is the package an argument names: the argument itself, or, when it
+// is the path of a package slices file, the file's name without ".yaml". So
+// slices/bash.yaml, as a shell completes it, is bash. The path is not opened.
+func Package(arg string) string {
+	if name, ok := strings.CutSuffix(filepath.Base(arg), ".yaml"); ok && name != "" {
+		return name
+	}
+	return arg
+}
+
 // Read parses the package slices file for pkg under release and strips it:
 // essentials, mutate scripts, until, generated content and attributes are
 // dropped, and a copy entry is re-keyed by its source. Only path keys and their
