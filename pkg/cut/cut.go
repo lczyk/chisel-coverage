@@ -124,13 +124,19 @@ func (r *Runner) Cut(ctx context.Context, release, root, arch, slice string) (*R
 }
 
 // CutAs is Cut with the lines Verbose receives carrying label in place of
-// the slice, for telling apart two cuts of one slice and architecture.
-func (r *Runner) CutAs(ctx context.Context, release, root, arch, slice, label string) (*Result, error) {
+// the slice, for telling apart two cuts of one slice and architecture. The
+// slices in with are cut alongside, in the same chisel cut, and the result
+// is the slice's: its version, and a missing package is ErrNotAvailable
+// only when it is the slice's own. Any other failure, ErrNoContent among
+// them, is the cut's whichever slice caused it, so with is for slices that
+// cannot fail on their own, one that only generates a manifest say.
+func (r *Runner) CutAs(ctx context.Context, release, root, arch, slice, label string, with ...string) (*Result, error) {
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, err
 	}
 	args := []string{"cut", "--release", release, "--root", root, "--arch", arch,
 		"--ignore", "unmaintained", "--ignore", "unstable", slice}
+	args = append(args, with...)
 	cmd, out := r.command(ctx, args, arch+" "+label+" ")
 	pkg, _, _ := strings.Cut(slice, "_")
 	if err := cmd.Run(); err != nil {

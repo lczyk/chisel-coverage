@@ -44,6 +44,9 @@ type Unit struct {
 	Release string // the release dir chisel cuts against
 	Arch    string
 	Slice   string // <package>_<slice>
+	// With are more slices cut alongside Slice in the one chisel cut, as
+	// cut.Runner.CutAs takes them.
+	With []string
 	// Label is what the log lines call the unit, for telling apart two units
 	// of one slice and architecture; Slice when empty.
 	Label string
@@ -406,7 +409,7 @@ func (w *worker) prepare(u Unit) {
 func (w *worker) cut(u Unit) Cut {
 	p := w.p
 	c := Cut{Unit: u, Root: p.root(u), Start: time.Now()}
-	c.Result, c.Err = w.runner.CutAs(p.ctx, u.Release, c.Root, u.Arch, u.Slice, label(u))
+	c.Result, c.Err = w.runner.CutAs(p.ctx, u.Release, c.Root, u.Arch, u.Slice, label(u), u.With...)
 	p.cutf(u.Arch, label(u), c.Result, c.Err)
 	return c
 }
