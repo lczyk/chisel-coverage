@@ -81,6 +81,23 @@ func TestReadStrips(t *testing.T) {
 	assert.Nil(t, d.Slice("nope"))
 }
 
+func TestPackage(t *testing.T) {
+	for arg, want := range map[string]string{
+		"bash":                          "bash",
+		"bash.yaml":                     "bash",
+		"slices/bash.yaml":              "bash",
+		"/rel/slices/extra/libc6.yaml":  "libc6",
+		"../rel/slices/python3.14.yaml": "python3.14",
+		"libstdc++6":                    "libstdc++6",
+		"python3.14":                    "python3.14",
+		"slices/bash.yml":               "slices/bash.yml",
+		".yaml":                         ".yaml",
+		"":                              "",
+	} {
+		assert.Equal(t, Package(arg), want, arg)
+	}
+}
+
 func TestReadErrors(t *testing.T) {
 	rel := t.TempDir()
 	assert.NoError(t, os.MkdirAll(filepath.Join(rel, "slices"), 0755))

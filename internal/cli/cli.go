@@ -19,6 +19,7 @@ import (
 	"github.com/lczyk/chisel-coverage/pkg/cache"
 	"github.com/lczyk/chisel-coverage/pkg/cut"
 	"github.com/lczyk/chisel-coverage/pkg/cuts"
+	"github.com/lczyk/chisel-coverage/pkg/packageslicesfile"
 	"github.com/lczyk/chisel-coverage/pkg/release"
 )
 
@@ -153,9 +154,10 @@ func newParser(f *flags) *goflags.Parser {
 	p.LongDescription = strings.TrimSpace(`
 for each package, every slice is cut on its own against a throwaway copy of
 the release with only that package in it, and so is one slice taking the whole
-.deb. what the whole-deb cut has and no slice cut has is uncovered. the
-"chisel" binary is found on PATH, or set CHISEL=/path/to/chisel. "version"
-and "help" as the first argument are --version and --help.`)
+.deb. what the whole-deb cut has and no slice cut has is uncovered. a package
+may be given as the path of its file, slices/<package>.yaml. the "chisel"
+binary is found on PATH, or set CHISEL=/path/to/chisel. "version" and "help"
+as the first argument are --version and --help.`)
 	if _, err := p.AddGroup("flags", "", f); err != nil {
 		panic(err)
 	}
@@ -164,7 +166,7 @@ and "help" as the first argument are --version and --help.`)
 
 // parseArgs parses the command line. List flags take comma-separated values
 // and may repeat; -h, --help and --version work wherever they land on the
-// line. Help is not an error: the usage goes to help, f.help is set and the
+// line. A package given as the path of its file is the package. Help is not an error: the usage goes to help, f.help is set and the
 // caller stops. The usage is written by the parser that ran, since go-flags
 // only renders defaults once it has parsed.
 func parseArgs(args []string, help io.Writer) (f flags, pkgs []string, err error) {
@@ -181,6 +183,9 @@ func parseArgs(args []string, help io.Writer) (f flags, pkgs []string, err error
 	}
 	for _, l := range []*[]string{&f.Arches, &f.Slices, &f.Ignores} {
 		*l = splitLists(*l)
+	}
+	for i, pkg := range pkgs {
+		pkgs[i] = packageslicesfile.Package(pkg)
 	}
 	return f, pkgs, nil
 }
