@@ -43,7 +43,7 @@ total 3 covered 3 ignored 0 uncovered 0
 
 every entry of the deb counts, directories included. a directory is covered once anything under it is. `--arch all` checks every architecture, and architectures with the same version are folded on what their debs ship. `<arch>` and `<gnu>` in paths are normalised and paths are grouped across arches. `--no-group` ungroups. `--json` never groups. 
 
-several packages can be given at once, and all cuts run in parallel. jobs get work at slice-level granularity. one job per cpu by default (`--jobs=-1`) and each job is set up with a private view of the cache so concurrent cuts dont clobber one-anothe's caches. `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`.
+several packages can be given at once, and all cuts run in parallel. jobs get work at slice-level granularity. one job per cpu by default (`--jobs=-1`) and each job is set up with a private view of the cache so concurrent cuts dont clobber one-anothe's caches. `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`. a package can also be given as the path of its file (`slices/bash.yaml`), so tab completion works.
 
 you can add paths to `--ignore`. the syntax is identical to chisel's package slices files since that's what ignore is doing under the hood. in fact, this entire tool is written using pattented (not really) [`chisel-proxy`](https://github.com/lczyk/chisel-proxy) technology. `--ignore` only ever shrinks the uncovered set so a covered path that matches an ignore stays covered.
 

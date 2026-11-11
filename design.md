@@ -99,7 +99,7 @@ chisel-coverage [flags] <package>...
   -h, --help                   this text
 ```
 
-flags are parsed by go-flags, the library chisel uses, so `--flag=value`, `--flag value` and flags after positionals behave as in chisel; `version` and `help` as the first argument are kept as `--version` / `--help` aliases. exit codes: 0 ran fine; 1 only with `--fail-uncovered`; 2 usage error, io error or a cut that failed. no default ignores. the text report gets a little colour (bold blue name, dim arches, counts green when as hoped -- covered non-zero, ignored and uncovered zero -- else yellow, red for uncovered; yellow "not available", red "error") only when stdout is a terminal and `NO_COLOR` is unset or empty, per no-color.org; piped output is plain.
+flags are parsed by go-flags, the library chisel uses, so `--flag=value`, `--flag value` and flags after positionals behave as in chisel; `version` and `help` as the first argument are kept as `--version` / `--help` aliases. a package may be given as the path of its file: an argument ending in `.yaml` is its basename without the suffix (`packageslicesfile.Package`), so `slices/bash.yaml` is `bash` and the shell completes it. the path itself is not opened, and the file is still read from `--release`. exit codes: 0 ran fine; 1 only with `--fail-uncovered`; 2 usage error, io error or a cut that failed. no default ignores. the text report gets a little colour (bold blue name, dim arches, counts green when as hoped -- covered non-zero, ignored and uncovered zero -- else yellow, red for uncovered; yellow "not available", red "error") only when stdout is a terminal and `NO_COLOR` is unset or empty, per no-color.org; piped output is plain.
 
 ## report
 
