@@ -13,8 +13,10 @@ import (
 )
 
 // fakeChisel prints what $FAKE_SAYS holds and exits $FAKE_CODE after creating
-// a file and a symlink in --root.
+// a file and a symlink in --root. With $FAKE_ARGS set it writes its
+// arguments there, one a line.
 const fakeChisel = `#!/bin/sh
+if [ -n "$FAKE_ARGS" ]; then printf '%s\n' "$@" > "$FAKE_ARGS"; fi
 while [ $# -gt 1 ]; do
   case "$1" in --root) root="$2"; shift 2;; *) shift;; esac
 done
@@ -42,6 +44,26 @@ func TestCutWalksAndReadsVersion(t *testing.T) {
 	assert.EqualArrays(t, res.Paths, []string{"/usr/", "/usr/bin/", "/usr/bin/d", "/usr/bin/demo"})
 	assert.Equal(t, res.Version, "1.0-1ubuntu2")
 	assert.Equal(t, res.DebArch, "all")
+}
+
+func TestCutWith(t *testing.T) {
+	r := fake(t)
+	args := filepath.Join(t.TempDir(), "args")
+	t.Setenv("FAKE_CODE", "0")
+	t.Setenv("FAKE_ARGS", args)
+	t.Setenv("FAKE_SAYS", "Fetching pool/main/d/demo/demo_2.0_amd64.deb...")
+	res, err := r.CutAs(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins", "demo_bins@base", "demo_extra", "other_libs")
+	assert.NoError(t, err)
+	assert.Equal(t, res.Version, "2.0")
+	b, err := os.ReadFile(args)
+	assert.NoError(t, err)
+	assert.That(t, bytes.HasSuffix(b, []byte("demo_bins\ndemo_extra\nother_libs\n")))
+
+	// A missing package is the slice's own only when it is.
+	t.Setenv("FAKE_CODE", "1")
+	t.Setenv("FAKE_SAYS", `error: cannot find package "other" in archive(s)`)
+	_, err = r.CutAs(context.Background(), "/rel", filepath.Join(t.TempDir(), "root"), "amd64", "demo_bins", "demo_bins", "other_libs")
+	assert.ErrorIs(t, err, ErrEssentialNotAvailable)
 }
 
 func TestCutVersionIsThisPackagesOnly(t *testing.T) {

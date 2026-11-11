@@ -26,17 +26,21 @@ import (
 // $FAKE_SLEEP, when set, is slept first. With $FAKE_CACHE set it behaves like
 // chisel's cache: it fails unless blob $FAKE_CACHE is in
 // $XDG_CACHE_HOME/chisel/sha256/, then writes a blob named after the cut
-// there and appends "<home> <arch> <slice>" to $FAKE_HOMES.
+// there and appends "<home> <arch> <slice>" to $FAKE_HOMES. With $FAKE_ARGS
+// set it appends its arguments there, a cut a line.
 const fakeChisel = `#!/bin/sh
-while [ $# -gt 1 ]; do
+[ -n "$FAKE_ARGS" ] && printf '%s\n' "$*" >> "$FAKE_ARGS"
+slice=
+while [ $# -gt 0 ]; do
   case "$1" in
     --release) release="$2"; shift 2;;
     --root) root="$2"; shift 2;;
     --arch) arch="$2"; shift 2;;
-    *) shift;;
+    --ignore) shift 2;;
+    cut) shift;;
+    *) [ -z "$slice" ] && slice="$1"; shift;;
   esac
 done
-slice="$1"
 pkg="${slice%%_*}"
 printf '%s %s %s\n' "$arch" "$slice" "$release" >> "$FAKE_LOG"
 [ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
@@ -291,6 +295,22 @@ func TestSerialCutsEachListInOrderWithoutViews(t *testing.T) {
 	for _, l := range lines {
 		assert.Equal(t, strings.Fields(l)[0], os.Getenv("XDG_CACHE_HOME"))
 	}
+}
+
+func TestWith(t *testing.T) {
+	f := setup(t)
+	args := filepath.Join(f.tmp, "..", "args")
+	t.Setenv("FAKE_ARGS", args)
+	p, err := New(context.Background(), Options{Runner: f.runner})
+	assert.NoError(t, err)
+	err = p.Pass([]Group{{Lead: Unit{Release: "rel", Arch: "amd64", Slice: "bash_bins", With: []string{"bash_extra"}}}}, func(Cut) bool { return true })
+	assert.NoError(t, err)
+	p.Close()
+	b, err := os.ReadFile(args)
+	assert.NoError(t, err)
+	assert.That(t, strings.HasSuffix(string(b), " bash_bins bash_extra\n"), string(b))
+	// The cut is the unit's own slice's, not the one alongside.
+	assert.EqualArrays(t, f.cuts(t), []string{"amd64 bash_bins rel"})
 }
 
 func TestKeepAndDir(t *testing.T) {
