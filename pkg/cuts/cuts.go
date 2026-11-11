@@ -13,18 +13,16 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/lczyk/chisel-proxy/pkg/deb"
 	temprelease "github.com/lczyk/chisel-proxy/pkg/temp-release"
 
-	"github.com/lczyk/chisel-coverage/pkg/cache"
 	"github.com/lczyk/chisel-coverage/pkg/cut"
 	"github.com/lczyk/chisel-coverage/pkg/packageslicesfile"
+	"github.com/lczyk/chisel-coverage/pkg/pool"
 )
 
 // Options configures a run.
@@ -99,24 +97,13 @@ type run struct {
 	ctx      context.Context
 	opts     Options
 	names    packageslicesfile.Names
-	work     string
+	pool     *pool.Pool
 	prepared []*prepared
 	results  []Package
-	jobs     int             // cuts allowed to run at once
 	took     []time.Duration // per package, the wall time of its lead arch cuts so far
-	seed     time.Duration   // the last view's seeding time; 0 until one was
 	done     []int           // per package, the cuts behind took
 	cells    [][]cell        // per package and architecture, what its cuts found
-	viewCost time.Duration   // of making and removing one view; 0 without a cache
-	start    time.Time
-	rm       sync.WaitGroup // rootfs dirs being removed in the background
 	mu       sync.Mutex
-	logMu    sync.Mutex    // the Log and Verbose writers
-	seeding  sync.Mutex    // views are seeded one at a time, see worker
-	views    []*cache.View // idle views, for the next worker
-	cuts     int           // the totals of the run, for the summary line
-	paths    int
-	bytes    int64
 }
 
 // unit is one slice of one package on one architecture, ci indexing the
@@ -130,15 +117,6 @@ type cell struct {
 	version string
 	debArch string
 	sets    map[string][]string // slice -> paths in its rootfs
-}
-
-// worker cuts one slice at a time on one architecture with its own view of
-// chisel's cache, merged back after every cut so the others gain the blobs.
-type worker struct {
-	r       *run
-	runner  cut.Runner
-	isolate bool // wants a view of the cache, made on its first unit
-	view    *cache.View
 }
 
 // Run cuts every package on every architecture and returns the results in
@@ -163,14 +141,11 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		return nil, err
 	}
 
-	r := &run{ctx: ctx, opts: opts, names: packageslicesfile.Names(opts.Prefix), jobs: Jobs(opts.Jobs), took: make([]time.Duration, len(pkgs)), done: make([]int, len(pkgs)), start: time.Now()}
+	r := &run{ctx: ctx, opts: opts, names: packageslicesfile.Names(opts.Prefix), took: make([]time.Duration, len(pkgs)), done: make([]int, len(pkgs))}
 	if r.names == "" {
 		r.names = packageslicesfile.DefaultPrefix
 	}
 	defer r.cleanup()
-	if r.jobs > 1 && opts.Cache != "" {
-		r.viewCost = cache.Cost(opts.Cache)
-	}
 	for _, pkg := range pkgs {
 		p, err := r.prepare(chiselYAML, pkg, only[pkg])
 		if err != nil {
@@ -188,12 +163,9 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(p.only, ", "))
 		}
 	}
-	r.work, err = os.MkdirTemp("", "chisel-coverage-*")
+	r.pool, err = pool.New(ctx, pool.Options{Jobs: opts.Jobs, Cache: opts.Cache, Runner: opts.Runner, Keep: opts.Keep, Name: string(r.names), Log: opts.Log, Verbose: opts.Verbose})
 	if err != nil {
 		return nil, err
-	}
-	if opts.Keep {
-		r.logf("rootfs dirs: %s", r.work)
 	}
 
 	// The lead architecture alone first, so the rest find the arch: all debs
@@ -219,43 +191,12 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	r.removeViews()
-	r.verbosef("%d cuts %d paths %.1fmb %.1fs", r.cuts, r.paths, float64(r.bytes)/1e6, time.Since(r.start).Seconds())
+	r.pool.Summary()
 	return r.results, nil
 }
 
-// ResolveArches expands "all", defaults to the host and keeps the order
-// given, first occurrence wins.
-func ResolveArches(given []string) ([]string, error) {
-	if len(given) == 0 {
-		a, err := deb.InferArch()
-		if err != nil {
-			return nil, err
-		}
-		return []string{a}, nil
-	}
-	var out []string
-	seen := map[string]bool{}
-	add := func(a string) {
-		if !seen[a] {
-			seen[a] = true
-			out = append(out, a)
-		}
-	}
-	for _, a := range given {
-		if a == "all" {
-			for _, x := range deb.Arches() {
-				add(x)
-			}
-			continue
-		}
-		if !deb.ValidArch(a) {
-			return nil, fmt.Errorf("invalid architecture %q", a)
-		}
-		add(a)
-	}
-	return out, nil
-}
+// ResolveArches is pool.ResolveArches.
+func ResolveArches(given []string) ([]string, error) { return pool.ResolveArches(given) }
 
 // unique drops repeats, keeping the first occurrence's place.
 func unique(in []string) []string {
@@ -371,92 +312,40 @@ func (r *run) anyExists(names []string) bool {
 	return false
 }
 
-// Jobs is how many cuts may run at once for a --jobs value: n itself, one
-// for 0, one per cpu for a negative value.
-func Jobs(n int) int {
-	switch {
-	case n < 0:
-		return runtime.NumCPU()
-	case n == 0:
-		return 1
-	}
-	return n
-}
+// Jobs is pool.Jobs.
+func Jobs(n int) int { return pool.Jobs(n) }
 
 // pass cuts the lead slice of each (package, architecture) given and, as
 // each finds its package, the package's other slices, then assembles the
-// results. Workers feed the queue themselves, so no slice is cut where there
-// is no package and no worker waits for the others between the two.
+// results.
 func (r *run) pass(leads []unit) {
-	var work time.Duration
-	total := 0
-	for _, u := range leads {
-		cuts := len(r.prepared[u.pi].cuts)
-		total += cuts
-		work += r.avg(u.pi) * time.Duration(cuts)
+	groups := make([]pool.Group, len(leads))
+	for i, u := range leads {
+		cost := r.avg(u.pi)
+		cuts := r.prepared[u.pi].cuts
+		groups[i].Lead = r.unit(u, cuts[0], cost)
+		for ci := 1; ci < len(cuts); ci++ {
+			groups[i].Rest = append(groups[i].Rest, r.unit(unit{u.pi, u.ai, ci}, cuts[ci], cost))
+		}
 	}
-	n := r.workers(work, total)
-	queue := make(chan unit, total)
-	var pm sync.Mutex
-	pending := len(leads)
-	for _, u := range leads {
-		queue <- u
-	}
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			w := r.worker(i > 0)
-			defer w.close()
-			for u := range queue {
-				w.prepare(r.opts.Arches[u.ai], r.prepared[u.pi].def.Package)
-				start := time.Now()
-				r.cutUnit(w, u)
-				if u.ai == 0 {
-					r.mu.Lock()
-					r.took[u.pi] += time.Since(start)
-					r.done[u.pi]++
-					r.mu.Unlock()
-				}
-				w.merge()
-				more := r.followUps(u)
-				pm.Lock()
-				for _, f := range more {
-					queue <- f
-				}
-				pending += len(more) - 1
-				if pending == 0 {
-					close(queue)
-				}
-				pm.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
+	_ = r.pool.Pass(groups, r.cut)
 	for _, u := range leads {
 		r.results[u.pi].Arches[u.ai] = r.assemble(u.pi, u.ai)
 	}
 }
 
-// followUps is what a finished unit puts on the queue: the package's other
-// slices once its lead cut found it, nothing otherwise or once the run is
-// being stopped.
-func (r *run) followUps(u unit) []unit {
-	if u.ci != 0 || r.ctx.Err() != nil {
-		return nil
+// unit is the cut of slice name for u as the pool takes it, its rootfs under
+// <package>/<arch>/<slice>.
+func (r *run) unit(u unit, name string, cost time.Duration) pool.Unit {
+	p, arch := r.prepared[u.pi], r.opts.Arches[u.ai]
+	return pool.Unit{
+		Release: p.rel.Dir,
+		Arch:    arch,
+		Slice:   p.def.Package + "_" + name,
+		Dir:     filepath.Join(p.def.Package, arch, name),
+		Cost:    cost,
+		Tag:     u,
 	}
-	r.mu.Lock()
-	c := r.cells[u.pi][u.ai]
-	r.mu.Unlock()
-	if !c.avail || c.err != nil {
-		return nil
-	}
-	var more []unit
-	for ci := 1; ci < len(r.prepared[u.pi].cuts); ci++ {
-		more = append(more, unit{u.pi, u.ai, ci})
-	}
-	return more
 }
 
 // avg is what a cut of the package has taken on the lead architecture so
@@ -470,59 +359,11 @@ func (r *run) avg(pi int) time.Duration {
 	return r.took[pi] / time.Duration(r.done[pi])
 }
 
-// workers is how many workers a pass of units gets for work seconds of
-// cuts: as many as cuts may run at once, but no more than pay off. The first
-// worker and every pooled view are free; each further worker waits for its
-// view, and views are seeded one at a time, so the k-th new one starts k
-// seeds in. A worker is added only while it brings the end of the pass
-// nearer.
-func (r *run) workers(work time.Duration, units int) int {
-	most := min(r.jobs, units)
-	if most <= 1 || r.viewCost == 0 {
-		return most
-	}
-	r.mu.Lock()
-	free, seed := 1+len(r.views), r.seed
-	r.mu.Unlock()
-	if seed == 0 {
-		seed = r.viewCost
-	}
-	best, end := 1, work
-	for k := 2; k <= most; k++ {
-		e := finish(work, k, free, seed)
-		if e >= end {
-			break
-		}
-		best, end = k, e
-	}
-	return best
-}
-
-// finish is when k workers are done with work seconds of cuts, free of them
-// starting at once and the rest one seed apart: the workers' active time
-// adds up to the work.
-func finish(work time.Duration, k, free int, seed time.Duration) time.Duration {
-	starts := make([]time.Duration, k)
-	for i := free; i < k; i++ {
-		starts[i] = time.Duration(i-free+1) * seed
-	}
-	var sum time.Duration
-	for m := 1; m <= k; m++ {
-		sum += starts[m-1]
-		end := (work + sum) / time.Duration(m)
-		if m == k || end <= starts[m] {
-			return end
-		}
-	}
-	return work
-}
-
-// probePhase runs the probes, one worker per architecture and no views:
-// the only blob two chisels can both miss is an architecture's Packages
-// index, and a worker's probes are all on one architecture, one after
-// another. The full cuts that follow then find every index cached.
+// probePhase runs the probes, one worker per architecture and no views: a
+// worker's probes are all on one architecture, one after another. The full
+// cuts that follow then find every index cached.
 func (r *run) probePhase(units []unit) {
-	var byArch [][]unit
+	var byArch [][]pool.Unit
 	index := map[int]int{}
 	for _, u := range units {
 		i, ok := index[u.ai]
@@ -531,143 +372,56 @@ func (r *run) probePhase(units []unit) {
 			index[u.ai] = i
 			byArch = append(byArch, nil)
 		}
-		byArch[i] = append(byArch[i], u)
+		byArch[i] = append(byArch[i], r.unit(u, r.names.Probe(), 0))
 	}
-	n := min(r.jobs, len(byArch))
-	next := make(chan []unit)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			w := r.worker(false)
-			for group := range next {
-				for _, u := range group {
-					r.results[u.pi].Arches[u.ai] = r.probe(w, u)
-				}
-			}
-		}()
-	}
-groups:
-	for _, group := range byArch {
-		select {
-		case next <- group:
-		case <-r.ctx.Done():
-			break groups
-		}
-	}
-	close(next)
-	wg.Wait()
+	_ = r.pool.Serial(byArch, func(c pool.Cut) {
+		u := c.Tag.(unit)
+		r.results[u.pi].Arches[u.ai] = r.probed(c)
+	})
 }
 
-// worker makes a worker, isolated in a view of the cache when asked to and
-// there is a cache dir.
-func (r *run) worker(isolate bool) *worker {
-	return &worker{r: r, runner: *r.opts.Runner, isolate: isolate && r.opts.Cache != ""}
-}
-
-// prepare gives an isolated worker its view before its first unit, on arch
-// for pkg: one an earlier worker left when there is one, else a new one,
-// logged like a cut as "<arch> <pkg>_<prefix>-cache-view <blobs>".
-// When no view can be made the worker shares chisel's cache as is.
-func (w *worker) prepare(arch, pkg string) {
-	if !w.isolate {
-		return
-	}
-	w.isolate = false
-	r := w.r
-	r.mu.Lock()
-	if n := len(r.views); n > 0 {
-		w.view, r.views = r.views[n-1], r.views[:n-1]
-	}
-	r.mu.Unlock()
-	if w.view == nil {
-		// Linking into one directory serialises in the kernel anyway, so
-		// seeding views one at a time costs nothing overall and gets the
-		// first one out sooner.
-		r.seeding.Lock()
-		start := time.Now()
-		view, err := cache.New(r.opts.Cache)
-		r.seeding.Unlock()
-		if err != nil {
-			r.logf("%s %s_%s-cache-view error: %v; sharing chisel's cache instead", arch, pkg, r.names, err)
-			return
-		}
-		r.mu.Lock()
-		r.seed = time.Since(start)
-		r.mu.Unlock()
-		r.verbosef("%s %s_%s-cache-view %d", arch, pkg, r.names, view.Blobs())
-		w.view = view
-	}
-	w.runner.CacheHome = w.view.Home
-}
-
-func (w *worker) cut(release, root, arch, slice string) (*cut.Result, error) {
-	return w.runner.Cut(w.r.ctx, release, root, arch, slice)
-}
-
-// merge publishes what the worker's view fetched into the shared cache.
-func (w *worker) merge() {
-	if w.view == nil {
-		return
-	}
-	if err := w.view.Merge(); err != nil {
-		w.r.logf("cache view: %v", err)
-	}
-}
-
-// close hands the view back for the next worker.
-func (w *worker) close() {
-	w.merge()
-	if w.view != nil {
-		w.r.mu.Lock()
-		w.r.views = append(w.r.views, w.view)
-		w.r.mu.Unlock()
-	}
-}
-
-// cutUnit cuts one slice into its cell. Once a cut of the cell has failed
-// the rest are skipped, since the architecture reports the error anyway.
-func (r *run) cutUnit(w *worker, u unit) {
-	p, arch := r.prepared[u.pi], r.opts.Arches[u.ai]
+// cut takes one finished cut into its cell and says whether the cell's other
+// slices are still worth cutting: not where there is no package, and not
+// once a cut of the cell has failed, since the architecture reports the
+// error anyway.
+func (r *run) cut(c pool.Cut) bool {
+	u := c.Tag.(unit)
+	p := r.prepared[u.pi]
 	name := p.cuts[u.ci]
-	c := &r.cells[u.pi][u.ai]
-	r.mu.Lock()
-	failed := c.err != nil
-	r.mu.Unlock()
-	if failed {
-		return
+	if c.Err == nil && r.opts.Visit != nil && name != r.names.Probe() {
+		r.opts.Visit(Cut{Package: p.def.Package, Arch: c.Arch, Slice: name, Root: c.Root, Result: c.Result})
 	}
-	root := filepath.Join(r.work, p.def.Package, arch, name)
-	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+name)
-	r.cutf(arch, p.def.Package+"_"+name, res, err)
-	if err == nil && r.opts.Visit != nil && name != r.names.Probe() {
-		r.opts.Visit(Cut{Package: p.def.Package, Arch: arch, Slice: name, Root: root, Result: res})
-	}
-	r.discard(root)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if u.ai == 0 {
+		r.took[u.pi] += time.Since(c.Start)
+		r.done[u.pi]++
+	}
+	cell := &r.cells[u.pi][u.ai]
 	switch {
-	case errors.Is(err, cut.ErrNotAvailable) && u.ci == 0:
+	case errors.Is(c.Err, cut.ErrNotAvailable) && u.ci == 0:
 		// Not on this architecture; the cell stays unavailable.
-	case errors.Is(err, cut.ErrNoContent) && r.names.IsIgnore(name):
+		return false
+	case errors.Is(c.Err, cut.ErrNoContent) && r.names.IsIgnore(name):
 		// An ignore glob matching nothing in this package ignores nothing.
-	case err != nil:
-		if c.err == nil {
-			c.err = err
+	case c.Err != nil:
+		if cell.err == nil {
+			cell.err = c.Err
 		}
+		return false
 	default:
-		if c.sets == nil {
-			c.sets = map[string][]string{}
+		if cell.sets == nil {
+			cell.sets = map[string][]string{}
 		}
 		if name != r.names.Probe() {
-			c.sets[name] = res.Paths
+			cell.sets[name] = c.Result.Paths
 		}
 		if u.ci == 0 {
-			c.avail = true
-			c.version, c.debArch = res.Version, res.DebArch
+			cell.avail = true
+			cell.version, cell.debArch = c.Result.Version, c.Result.DebArch
 		}
 	}
+	return true
 }
 
 // assemble turns a cell into the architecture's result: every slice that
@@ -699,119 +453,42 @@ func (r *run) assemble(pi, ai int) Arch {
 	return a
 }
 
-// removeViews deletes the idle views, all at once since each is thousands of
-// unlinks.
-func (r *run) removeViews() {
-	var wg sync.WaitGroup
-	for _, v := range r.views {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = v.Remove()
-		}()
-	}
-	wg.Wait()
-	r.views = nil
-}
-
-// probe cuts the empty probe slice of an arch: all package on another
-// architecture and, when the package is there, hands back the lead
+// probed is what the cut of the empty probe slice of an arch: all package
+// on another architecture found: when the package is there, the lead
 // architecture's result for it.
-func (r *run) probe(w *worker, u unit) Arch {
-	p, arch := r.prepared[u.pi], r.opts.Arches[u.ai]
-	probe := r.names.Probe()
-	root := filepath.Join(r.work, p.def.Package, arch, probe)
-	res, err := w.cut(p.rel.Dir, root, arch, p.def.Package+"_"+probe)
-	r.cutf(arch, p.def.Package+"_"+probe, res, err)
-	r.discard(root)
-	if errors.Is(err, cut.ErrNotAvailable) {
-		return Arch{Arch: arch}
+func (r *run) probed(c pool.Cut) Arch {
+	u := c.Tag.(unit)
+	if errors.Is(c.Err, cut.ErrNotAvailable) {
+		return Arch{Arch: c.Arch}
 	}
-	if err != nil {
-		return Arch{Arch: arch, Err: err}
+	if c.Err != nil {
+		return Arch{Arch: c.Arch, Err: c.Err}
 	}
 	a := r.results[u.pi].Arches[0]
 	a.StandIn = a.Arch
-	a.Arch = arch
-	if res.Version != "" {
-		a.Version, a.DebArch = res.Version, res.DebArch
+	a.Arch = c.Arch
+	if c.Result.Version != "" {
+		a.Version, a.DebArch = c.Result.Version, c.Result.DebArch
 	}
 	return a
 }
 
-// discard removes a cut's rootfs in the background, since a big one is
-// thousands of unlinks the worker need not wait for. Kept with --keep.
-func (r *run) discard(root string) {
-	if r.opts.Keep {
-		return
-	}
-	r.rm.Add(1)
-	go func() {
-		defer r.rm.Done()
-		_ = os.RemoveAll(root)
-	}()
-}
-
 func (r *run) cleanup() {
-	r.rm.Wait()
-	r.removeViews()
+	if r.pool != nil {
+		r.pool.Close()
+	}
 	if r.opts.Keep {
 		return
 	}
 	for _, p := range r.prepared {
 		_ = p.rel.Remove()
 	}
-	if r.work != "" {
-		_ = os.RemoveAll(r.work)
-	}
 }
 
-// cutf counts one finished cut and reports it on the Verbose writer as
-// "<arch> <slice> <paths>"; a package missing for the architecture is
-// "n/a", a glob matching nothing "0", a failure "error".
-func (r *run) cutf(arch, slice string, res *cut.Result, err error) {
-	r.mu.Lock()
-	r.cuts++
-	if res != nil {
-		r.paths += len(res.Paths)
-		r.bytes += res.Bytes
-	}
-	r.mu.Unlock()
-	if r.opts.Verbose == nil {
-		return
-	}
-	var what string
-	switch {
-	case errors.Is(err, cut.ErrNotAvailable):
-		what = "n/a"
-	case errors.Is(err, cut.ErrNoContent):
-		what = "0"
-	case err != nil:
-		what = "error"
-	default:
-		what = fmt.Sprintf("%d", len(res.Paths))
-	}
-	r.verbosef("%s %s %s", arch, slice, what)
-}
-
-// verbosef writes a line on the Verbose writer.
-func (r *run) verbosef(format string, args ...any) {
-	if r.opts.Verbose != nil {
-		r.stampf(r.opts.Verbose, format, args...)
-	}
-}
-
+// logf writes one timestamped notice on the Log writer. It is only called
+// before the pool and its workers exist, so it takes no lock.
 func (r *run) logf(format string, args ...any) {
 	if r.opts.Log != nil {
-		r.stampf(r.opts.Log, format, args...)
+		fmt.Fprintf(r.opts.Log, "%s "+format+"\n", append([]any{cut.Stamp()}, args...)...)
 	}
-}
-
-// stampf writes one timestamped line in a single call under the run's
-// log lock, since workers log concurrently and the writer need not be
-// safe for that. See cut.Stamp for the line format.
-func (r *run) stampf(w io.Writer, format string, args ...any) {
-	r.logMu.Lock()
-	defer r.logMu.Unlock()
-	fmt.Fprintf(w, "%s "+format+"\n", append([]any{cut.Stamp()}, args...)...)
 }
