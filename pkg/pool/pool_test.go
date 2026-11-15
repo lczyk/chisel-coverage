@@ -456,3 +456,90 @@ func TestSuiteCache(t *testing.T) {
 		assert.Equal(t, f.runner.HTTPProxy, "")
 	}
 }
+
+// With RecentViews a view starts without the blobs not used of late. A cut
+// that fails for the lack of one is cut again in a whole view, so the run
+// ends as it would have with whole views, and plain cuts never start thin.
+func TestRecentViews(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		old, plain    bool
+		again, blobs1 bool
+	}{
+		{name: "needs an old blob", old: true, again: true},
+		{name: "needs a recent blob", blobs1: true},
+		{name: "plain", old: true, plain: true},
+	} {
+		f := setup(t)
+		shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+		dir := filepath.Join(shared, "sha256")
+		assert.NoError(t, os.MkdirAll(dir, 0755))
+		// The blob every cut of the fake needs, and one no cut does.
+		assert.NoError(t, os.WriteFile(filepath.Join(dir, "abc123"), []byte("x"), 0644))
+		assert.NoError(t, os.WriteFile(filepath.Join(dir, "def456"), []byte("y"), 0644))
+		old := time.Now().Add(-48 * time.Hour)
+		assert.NoError(t, os.Chtimes(filepath.Join(dir, "def456"), old, old))
+		if c.old {
+			assert.NoError(t, os.Chtimes(filepath.Join(dir, "abc123"), old, old))
+		}
+		t.Setenv("FAKE_CACHE", "abc123")
+		if c.plain {
+			t.Setenv(PlainEnv, "1")
+		}
+		var log, out strings.Builder
+		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, Cache: shared, Name: "t", RecentViews: time.Hour, Log: &log, Verbose: &out})
+		assert.NoError(t, err)
+		err = p.Pass([]Group{
+			group("rel", "amd64", "bash_a", "bash_b", "bash_c"),
+			group("rel", "amd64", "dash_a", "dash_b", "dash_c"),
+		}, func(cut Cut) bool {
+			assert.NoError(t, cut.Err, c.name)
+			return true
+		})
+		assert.NoError(t, err)
+		p.Close()
+		assert.Equal(t, log.String(), "", c.name)
+		assert.Equal(t, strings.Contains(out.String(), "again, in a whole cache view"), c.again, c.name, out.String())
+		// A thin view of the one recent blob, else every blob.
+		assert.Equal(t, regexp.MustCompile(`-cache-view 1\n`).MatchString(out.String()), c.blobs1, c.name, out.String())
+		// Every cut's blob was merged back, whichever way it was cut.
+		blobs, err := os.ReadDir(dir)
+		assert.NoError(t, err)
+		assert.Len(t, blobs, 2+6)
+	}
+}
+
+// The first view seeded in part cuts a unit alone: when that shows the
+// cache cold, the workers after it start with whole views and nothing is
+// cut twice but the one unit that found out.
+func TestRecentViewsProbe(t *testing.T) {
+	f := setup(t)
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	dir := filepath.Join(shared, "sha256")
+	assert.NoError(t, os.MkdirAll(dir, 0755))
+	assert.NoError(t, os.WriteFile(filepath.Join(dir, "abc123"), []byte("x"), 0644))
+	old := time.Now().Add(-48 * time.Hour)
+	assert.NoError(t, os.Chtimes(filepath.Join(dir, "abc123"), old, old))
+	t.Setenv("FAKE_CACHE", "abc123")
+	t.Setenv("FAKE_SLEEP", "0.2")
+	var log, out strings.Builder
+	p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 4, Cache: shared, Name: "t", RecentViews: time.Hour, Log: &log, Verbose: &out})
+	assert.NoError(t, err)
+	var groups []Group
+	for _, pkg := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		groups = append(groups, group("rel", "amd64", pkg+"_x", pkg+"_y"))
+	}
+	err = p.Pass(groups, func(c Cut) bool {
+		assert.NoError(t, c.Err)
+		return true
+	})
+	assert.NoError(t, err)
+	p.Close()
+	assert.Equal(t, log.String(), "")
+	assert.Equal(t, strings.Count(out.String(), "again, in a whole cache view"), 1, out.String())
+	// One view seeded with nothing, the probe's, and the others whole.
+	thin := regexp.MustCompile(`-cache-view 0\n`).FindAllString(out.String(), -1)
+	assert.Len(t, thin, 1)
+	assert.That(t, len(regexp.MustCompile(`-cache-view \d+\n`).FindAllString(out.String(), -1)) > 1, out.String())
+	assert.Len(t, f.cuts(t), 16+1)
+}

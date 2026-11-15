@@ -42,8 +42,11 @@ type Options struct {
 	Jobs     int    // cuts running at once; 0 or 1 is one after another, -1 one per cpu
 	Cache    string // chisel's cache dir, for per-worker views; "" shares it as is
 	Runner   *cut.Runner
-	Log      io.Writer // notices (--keep, cache trouble); nil discards
-	Verbose  io.Writer // one line per cut; nil discards
+	// SuiteCache and RecentViews are pool.Options' own.
+	SuiteCache  bool
+	RecentViews time.Duration
+	Log         io.Writer // notices (--keep, cache trouble); nil discards
+	Verbose     io.Writer // one line per cut; nil discards
 	// Visit, when set, sees every cut that succeeded while its rootfs still
 	// exists. Workers call it concurrently.
 	Visit func(Cut)
@@ -169,7 +172,8 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		r.results = append(r.results, Package{Name: def.Package, Slices: p.slices, Arches: make([]Arch, len(opts.Arches))})
 		r.cells = append(r.cells, make([]cell, len(opts.Arches)))
 	}
-	r.pool, err = pool.New(ctx, pool.Options{Jobs: opts.Jobs, Cache: opts.Cache, Runner: opts.Runner, Keep: opts.Keep, Name: string(r.names), Log: opts.Log, Verbose: opts.Verbose})
+	r.pool, err = pool.New(ctx, pool.Options{Jobs: opts.Jobs, Cache: opts.Cache, Runner: opts.Runner, Keep: opts.Keep, Name: string(r.names), Log: opts.Log, Verbose: opts.Verbose,
+		SuiteCache: opts.SuiteCache, RecentViews: opts.RecentViews})
 	if err != nil {
 		return nil, err
 	}

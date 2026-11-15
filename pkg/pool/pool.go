@@ -40,8 +40,19 @@ type Options struct {
 	// not once a cut, through a proxy of the pool's own, see suitecache.
 	// Off, whatever it says, when $CHISEL_POOL_PLAIN is set.
 	SuiteCache bool
-	Log        io.Writer // notices (--keep, cache trouble); nil discards
-	Verbose    io.Writer // one line per cut; nil discards
+	// RecentViews, when not zero, seeds a worker's view of the cache with
+	// only the blobs chisel used within it, not with every one, which for
+	// a big cache is seconds a worker. What a cut then lacks chisel
+	// fetches again by its digest, so the cut is the same; the first
+	// blob fetched so has every view made whole, and a cut that fails in
+	// a view not whole is cut again in a whole one, so a failure is never
+	// the view's. The first such view cuts one unit before any other is
+	// made, so a cache that is cold for the run costs one worker's
+	// fetches and not every worker's. Off, whatever it says, when
+	// $CHISEL_POOL_PLAIN is set.
+	RecentViews time.Duration
+	Log         io.Writer // notices (--keep, cache trouble); nil discards
+	Verbose     io.Writer // one line per cut; nil discards
 }
 
 // Unit is one cut to run.
@@ -95,10 +106,14 @@ type Pool struct {
 	seeding  sync.Mutex    // views are seeded one at a time, see worker
 	views    []*cache.View // idle views, for the next worker
 	suites   *suitecache.Proxy
-	dirs     int // rootfs dirs numbered so far
-	cuts     int // the totals, for the summary line
-	paths    int
-	bytes    int64
+	whole    bool // views are to hold every blob from now on, see RecentViews
+	// probed is closed once the first view seeded in part has cut a unit
+	// and merged, nil until one is made: the others wait for it.
+	probed chan struct{}
+	dirs   int // rootfs dirs numbered so far
+	cuts   int // the totals, for the summary line
+	paths  int
+	bytes  int64
 }
 
 // worker cuts one unit at a time with its own view of chisel's cache, merged
@@ -108,14 +123,13 @@ type worker struct {
 	runner  cut.Runner
 	isolate bool // wants a view of the cache, made on its first unit
 	view    *cache.View
+	probe   bool // its view is the first seeded in part, see Pool.probed
+	cuts    bool // it has cut a unit
 }
 
 // New makes a pool and its work dir. When ctx is done the cuts stop.
 func New(ctx context.Context, opts Options) (*Pool, error) {
 	p := &Pool{ctx: ctx, opts: opts, jobs: Jobs(opts.Jobs), start: time.Now()}
-	if p.jobs > 1 && opts.Cache != "" {
-		p.viewCost = cache.Cost(opts.Cache)
-	}
 	pattern := opts.Temp
 	if pattern == "" {
 		pattern = "chisel-coverage-*"
@@ -126,7 +140,10 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 	}
 	p.work = work
 	if plain() {
-		p.opts.SuiteCache = false
+		p.opts.SuiteCache, p.opts.RecentViews = false, 0
+	}
+	if p.jobs > 1 && opts.Cache != "" {
+		p.viewCost = cache.CostRecent(opts.Cache, p.opts.RecentViews)
 	}
 	if p.opts.SuiteCache {
 		// Without it the cuts go to the archive themselves, as ever.
@@ -411,6 +428,27 @@ func (w *worker) prepare(u Unit) {
 	if n := len(p.views); n > 0 {
 		w.view, p.views = p.views[n-1], p.views[:n-1]
 	}
+	window := p.opts.RecentViews
+	var wait chan struct{}
+	switch {
+	case w.view != nil || window == 0 || p.whole:
+	case p.probed == nil:
+		p.probed = make(chan struct{})
+		w.probe = true
+	default:
+		wait = p.probed
+	}
+	p.mu.Unlock()
+	if wait != nil {
+		select {
+		case <-wait:
+		case <-p.ctx.Done():
+		}
+	}
+	p.mu.Lock()
+	if p.whole {
+		window = 0
+	}
 	p.mu.Unlock()
 	if w.view == nil {
 		pkg, _, _ := strings.Cut(u.Slice, "_")
@@ -419,10 +457,11 @@ func (w *worker) prepare(u Unit) {
 		// first one out sooner.
 		p.seeding.Lock()
 		start := time.Now()
-		view, err := cache.New(p.opts.Cache)
+		view, err := cache.NewRecent(p.opts.Cache, window)
 		p.seeding.Unlock()
 		if err != nil {
 			p.logf("%s %s_%s-cache-view error: %v; sharing chisel's cache instead", u.Arch, pkg, p.opts.Name, err)
+			w.proved()
 			return
 		}
 		p.mu.Lock()
@@ -438,9 +477,47 @@ func (w *worker) prepare(u Unit) {
 func (w *worker) cut(u Unit) Cut {
 	p := w.p
 	c := Cut{Unit: u, Root: p.root(u), Start: time.Now()}
+	w.whole(false)
 	c.Result, c.Err = w.runner.CutAs(p.ctx, u.Release, c.Root, u.Arch, u.Slice, label(u), u.With...)
+	if c.Err != nil && w.view != nil && w.view.Partial() && !archives(c.Err) && p.ctx.Err() == nil {
+		// The view may lack what the cut needed and could not fetch:
+		// only a cut in a whole view says the failure is the cut's own.
+		p.verbosef("%s %s again, in a whole cache view", u.Arch, label(u))
+		w.whole(true)
+		_ = os.RemoveAll(c.Root)
+		c.Result, c.Err = w.runner.CutAs(p.ctx, u.Release, c.Root, u.Arch, u.Slice, label(u), u.With...)
+	}
 	p.cutf(u.Arch, label(u), c.Result, c.Err)
+	w.cuts = true
 	return c
+}
+
+// archives reports whether a cut failed for what the archives hold, which
+// chisel only says once it has read their indexes: no view is at fault.
+func archives(err error) bool {
+	return errors.Is(err, cut.ErrNotAvailable) || errors.Is(err, cut.ErrEssentialNotAvailable) || errors.Is(err, cut.ErrNoContent)
+}
+
+// whole completes the worker's view when views are to be whole by now, or
+// when now is set, which also has every other view made whole before its
+// next cut.
+func (w *worker) whole(now bool) {
+	if w.view == nil || !w.view.Partial() {
+		return
+	}
+	p := w.p
+	p.mu.Lock()
+	if now {
+		p.whole = true
+	}
+	whole := p.whole
+	p.mu.Unlock()
+	if !whole {
+		return
+	}
+	if err := w.view.Complete(); err != nil {
+		p.logf("cache view: %v", err)
+	}
 }
 
 // merge publishes what the worker's view fetched into the shared cache.
@@ -451,11 +528,36 @@ func (w *worker) merge() {
 	if err := w.view.Merge(); err != nil {
 		w.p.logf("cache view: %v", err)
 	}
+	// A blob fetched though the shared cache had it: the views are too
+	// thin for this run, and every one is made whole before its next cut.
+	if w.view.Refetched() > 0 {
+		w.p.mu.Lock()
+		first := !w.p.whole
+		w.p.whole = true
+		w.p.mu.Unlock()
+		if first {
+			w.p.verbosef("cache views made whole: a blob was fetched again")
+		}
+	}
+	if w.cuts {
+		w.proved()
+	}
+}
+
+// proved lets the workers waiting for the first view seeded in part go on,
+// once that view's worker has cut and merged: by then the pool knows
+// whether such a view will do.
+func (w *worker) proved() {
+	if w.probe {
+		w.probe = false
+		close(w.p.probed)
+	}
 }
 
 // close hands the view back for the next worker.
 func (w *worker) close() {
 	w.merge()
+	w.proved()
 	if w.view != nil {
 		w.p.mu.Lock()
 		w.p.views = append(w.p.views, w.view)
