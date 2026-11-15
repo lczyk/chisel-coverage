@@ -7,14 +7,25 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lczyk/chisel-coverage/internal/cli"
+	"github.com/lczyk/chisel-coverage/pkg/cache"
+	"github.com/lczyk/chisel-coverage/pkg/cut"
+	"github.com/lczyk/chisel-coverage/pkg/pool"
 )
 
 const releaseBranch = "ubuntu-24.04"
@@ -134,5 +145,121 @@ func TestBashCoverage(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(release, "slices", "bash.yaml")); err != nil {
 		t.Fatalf("the checkout was modified: %v", err)
+	}
+}
+
+// flaky is a transport that can be taken down, as the network can.
+type flaky struct {
+	down atomic.Bool
+	rt   http.RoundTripper
+}
+
+func (f *flaky) RoundTrip(r *http.Request) (*http.Response, error) {
+	if f.down.Load() {
+		return nil, errors.New("the network is down")
+	}
+	return f.rt.RoundTrip(r)
+}
+
+// TestThinViews cuts real slices in views of the cache seeded with nothing,
+// since no blob was used of late, twice: with the network down, where the
+// cut that lacks a blob must be cut again in a whole view, and with it up,
+// where the blob is fetched again and the views are made whole. Either way
+// every cut ends as it did in the shared cache.
+func TestThinViews(t *testing.T) {
+	requireE2E(t)
+	tmp := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "xdg"))
+	release := cloneRelease(t, tmp)
+	shared := cache.Dir()
+	runner := &cut.Runner{Bin: cut.Binary()}
+	net := &flaky{rt: http.DefaultTransport}
+	slices := []string{"base-files_base", "libc6_libs", "libgcc-s1_libs"}
+	arches := []string{"amd64", "arm64"}
+	var units []pool.Unit
+	var groups []pool.Group
+	for _, a := range arches {
+		for _, s := range slices {
+			u := pool.Unit{Release: release, Arch: a, Slice: s}
+			units = append(units, u)
+			groups = append(groups, pool.Group{Lead: u})
+		}
+	}
+	// age makes every blob one last used ten days ago.
+	age := func() {
+		old := time.Now().Add(-240 * time.Hour)
+		err := filepath.WalkDir(shared, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			return os.Chtimes(p, old, old)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mu sync.Mutex
+	paths := func(into map[string]int) func(pool.Cut) {
+		return func(c pool.Cut) {
+			mu.Lock()
+			defer mu.Unlock()
+			if c.Err != nil {
+				t.Errorf("%s %s: %v", c.Arch, c.Slice, c.Err)
+				return
+			}
+			into[c.Arch+" "+c.Slice] = len(c.Result.Paths)
+		}
+	}
+
+	// In the shared cache, one after another, which also fills it and
+	// leaves the pool every suite's InRelease.
+	var out strings.Builder
+	p, err := pool.New(context.Background(), pool.Options{Jobs: 4, Cache: shared, Runner: runner, Transport: net, Log: os.Stderr, Verbose: &out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{}
+	if err := p.Serial([][]pool.Unit{units}, paths(want)); err != nil {
+		t.Fatal(err)
+	}
+	if len(want) != len(units) {
+		t.Fatalf("%d of %d cuts: %s", len(want), len(units), out.String())
+	}
+
+	// The network down: a view lacks every blob and nothing can be fetched.
+	age()
+	net.down.Store(true)
+	got := map[string]int{}
+	all := paths(got)
+	if err := p.Pass(groups, func(c pool.Cut) bool { all(c); return true }); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	if !maps.Equal(got, want) {
+		t.Errorf("offline: got %v, want %v", got, want)
+	}
+	if !strings.Contains(out.String(), "again, in a whole cache view") {
+		t.Errorf("offline: no cut was cut again:\n%s", out.String())
+	}
+
+	// The network up: what a view lacks is fetched again.
+	age()
+	net.down.Store(false)
+	out.Reset()
+	p, err = pool.New(context.Background(), pool.Options{Jobs: 4, Cache: shared, Runner: runner, Transport: net, Log: os.Stderr, Verbose: &out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = map[string]int{}
+	all = paths(got)
+	if err := p.Pass(groups, func(c pool.Cut) bool { all(c); return true }); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	if !maps.Equal(got, want) {
+		t.Errorf("online: got %v, want %v", got, want)
+	}
+	if !strings.Contains(out.String(), "cache views made whole") {
+		t.Errorf("online: the views were not made whole:\n%s", out.String())
 	}
 }
