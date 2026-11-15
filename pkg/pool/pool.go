@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,12 +37,10 @@ type Options struct {
 	// Temp is the pattern of the work dir, as os.MkdirTemp takes it;
 	// "chisel-coverage-*" when empty.
 	Temp string
-	// SuiteCache has the cuts fetch each suite's InRelease once a run and
-	// not once a cut, through a proxy of the pool's own, see suitecache.
-	SuiteCache bool
-	// RecentViews, when not zero, seeds a worker's view of the cache with
-	// only the blobs chisel used within it, not with every one, which for
-	// a big cache is seconds a worker. What a cut then lacks chisel
+	// RecentViews is how lately chisel must have used a blob of its cache
+	// for a worker's view of the cache to start with it: DefaultRecentViews
+	// when zero, and every blob when negative. A view of every blob is
+	// seconds a worker for a big cache. What a cut then lacks chisel
 	// fetches again by its digest, so the cut is the same; the first
 	// blob fetched so has every view made whole, and a cut that fails in
 	// a view not whole is cut again in a whole one, so a failure is never
@@ -49,8 +48,11 @@ type Options struct {
 	// made, so a cache that is cold for the run costs one worker's
 	// fetches and not every worker's.
 	RecentViews time.Duration
-	Log         io.Writer // notices (--keep, cache trouble); nil discards
-	Verbose     io.Writer // one line per cut; nil discards
+	// Transport is what the pool's suite cache fetches through, see
+	// suitecache; as http.DefaultTransport when nil.
+	Transport http.RoundTripper
+	Log       io.Writer // notices (--keep, cache trouble); nil discards
+	Verbose   io.Writer // one line per cut; nil discards
 }
 
 // Unit is one cut to run.
@@ -72,6 +74,9 @@ type Unit struct {
 	Cost time.Duration
 	Tag  any // the caller's own, handed back
 }
+
+// DefaultRecentViews is the Options.RecentViews of a pool given none.
+const DefaultRecentViews = 72 * time.Hour
 
 // Group is a lead unit and the units that only run once it has, and only for
 // as long as nothing has stopped the group.
@@ -137,14 +142,21 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 		return nil, err
 	}
 	p.work = work
+	switch {
+	case p.opts.RecentViews == 0:
+		p.opts.RecentViews = DefaultRecentViews
+	case p.opts.RecentViews < 0:
+		p.opts.RecentViews = 0
+	}
 	if p.jobs > 1 && opts.Cache != "" {
 		p.viewCost = cache.CostRecent(opts.Cache, p.opts.RecentViews)
 	}
-	if p.opts.SuiteCache {
-		// Without it the cuts go to the archive themselves, as ever.
-		if p.suites, err = suitecache.Start(); err != nil {
-			p.logf("suite cache: %v; every cut fetches its own", err)
-		}
+	// The cuts fetch each suite's InRelease once a run and not once a cut,
+	// through a proxy of the pool's own. Without it they go to the archive
+	// themselves.
+	if p.suites, err = suitecache.Start(opts.Transport); err != nil {
+		p.suites = nil
+		p.logf("suite cache: %v; every cut fetches its own", err)
 	}
 	if opts.Keep {
 		p.logf("rootfs dirs: %s", p.work)

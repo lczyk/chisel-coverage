@@ -42,8 +42,7 @@ type Options struct {
 	Jobs     int    // cuts running at once; 0 or 1 is one after another, -1 one per cpu
 	Cache    string // chisel's cache dir, for per-worker views; "" shares it as is
 	Runner   *cut.Runner
-	// SuiteCache and RecentViews are pool.Options' own.
-	SuiteCache  bool
+	// RecentViews is pool.Options' own.
 	RecentViews time.Duration
 	Log         io.Writer // notices (--keep, cache trouble); nil discards
 	Verbose     io.Writer // one line per cut; nil discards
@@ -173,7 +172,7 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		r.cells = append(r.cells, make([]cell, len(opts.Arches)))
 	}
 	r.pool, err = pool.New(ctx, pool.Options{Jobs: opts.Jobs, Cache: opts.Cache, Runner: opts.Runner, Keep: opts.Keep, Name: string(r.names), Log: opts.Log, Verbose: opts.Verbose,
-		SuiteCache: opts.SuiteCache, RecentViews: opts.RecentViews})
+		RecentViews: opts.RecentViews})
 	if err != nil {
 		return nil, err
 	}

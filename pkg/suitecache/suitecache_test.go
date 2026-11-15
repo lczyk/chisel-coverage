@@ -44,7 +44,7 @@ func TestProxy(t *testing.T) {
 		_, _ = io.WriteString(w, r.URL.Path+" body")
 	}))
 	defer up.Close()
-	p, err := Start()
+	p, err := Start(nil)
 	assert.NoError(t, err)
 	defer p.Close()
 

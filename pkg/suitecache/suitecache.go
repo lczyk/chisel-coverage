@@ -48,16 +48,19 @@ type entry struct {
 	body   []byte
 }
 
-// Start listens on a port of its own on the loopback and serves.
-func Start() (*Proxy, error) {
+// Start listens on a port of its own on the loopback and serves, fetching
+// through upstream, or when that is nil as http.DefaultTransport does.
+func Start(upstream http.RoundTripper) (*Proxy, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	// The process's own proxy settings are the user's, and upstream of
-	// this one: the chisels alone are pointed here.
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	p := &Proxy{URL: "http://" + ln.Addr().String(), upstream: t, entries: map[string]*entry{}}
+	if upstream == nil {
+		// The process's own proxy settings are the user's, and upstream
+		// of this one: the chisels alone are pointed here.
+		upstream = http.DefaultTransport.(*http.Transport).Clone()
+	}
+	p := &Proxy{URL: "http://" + ln.Addr().String(), upstream: upstream, entries: map[string]*entry{}}
 	p.srv = &http.Server{Handler: p}
 	go func() { _ = p.srv.Serve(ln) }()
 	return p, nil

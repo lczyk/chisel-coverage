@@ -418,44 +418,37 @@ func TestResolveArches(t *testing.T) {
 	assert.Error(t, err, `invalid architecture "vax"`)
 }
 
-// With SuiteCache every cut of the run is pointed at the pool's one proxy,
-// over a proxy setting of the user's own, and without it at the user's.
+// Every cut of a run is pointed at the pool's one proxy, over a proxy
+// setting of the user's own.
 func TestSuiteCache(t *testing.T) {
-	for _, plain := range []bool{false, true} {
-		f := setup(t)
-		seen := filepath.Join(t.TempDir(), "proxy")
-		t.Setenv("FAKE_PROXY", seen)
-		t.Setenv("http_proxy", "http://user.example:3128")
-		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, SuiteCache: !plain})
-		assert.NoError(t, err)
-		err = p.Pass([]Group{group("rel", "amd64", "bash_a", "bash_b"), group("rel", "arm64", "bash_a")}, func(c Cut) bool {
-			assert.NoError(t, c.Err)
-			return true
-		})
-		assert.NoError(t, err)
-		p.Close()
-		b, err := os.ReadFile(seen)
-		assert.NoError(t, err)
-		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-		assert.Len(t, lines, 3)
-		for _, l := range lines {
-			if plain {
-				assert.Equal(t, strings.TrimSpace(l), "http://user.example:3128")
-				continue
-			}
-			assert.Equal(t, l, lines[0])
-			assert.That(t, regexp.MustCompile(`^(http://127\.0\.0\.1:\d+) (http://127\.0\.0\.1:\d+)$`).MatchString(l), l)
-			assert.Equal(t, strings.Fields(l)[0], strings.Fields(l)[1])
-		}
-		// The caller's runner is not the pool's to change.
-		assert.Equal(t, f.runner.HTTPProxy, "")
+	f := setup(t)
+	seen := filepath.Join(t.TempDir(), "proxy")
+	t.Setenv("FAKE_PROXY", seen)
+	t.Setenv("http_proxy", "http://user.example:3128")
+	p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2})
+	assert.NoError(t, err)
+	err = p.Pass([]Group{group("rel", "amd64", "bash_a", "bash_b"), group("rel", "arm64", "bash_a")}, func(c Cut) bool {
+		assert.NoError(t, c.Err)
+		return true
+	})
+	assert.NoError(t, err)
+	p.Close()
+	b, err := os.ReadFile(seen)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	assert.Len(t, lines, 3)
+	for _, l := range lines {
+		assert.Equal(t, l, lines[0])
+		assert.That(t, regexp.MustCompile(`^(http://127\.0\.0\.1:\d+) (http://127\.0\.0\.1:\d+)$`).MatchString(l), l)
+		assert.Equal(t, strings.Fields(l)[0], strings.Fields(l)[1])
 	}
+	// The caller's runner is not the pool's to change.
+	assert.Equal(t, f.runner.HTTPProxy, "")
 }
 
-// With RecentViews a view starts without the blobs not used of late. A cut
-// that fails for the lack of one is cut again in a whole view, so the run
-// ends as it would have with whole views, and without it no view starts
-// thin.
+// A view starts without the blobs not used of late. A cut that fails for the
+// lack of one is cut again in a whole view, so the run ends as it would have
+// with whole views, which a negative RecentViews asks for.
 func TestRecentViews(t *testing.T) {
 	for _, c := range []struct {
 		name          string
@@ -481,7 +474,7 @@ func TestRecentViews(t *testing.T) {
 		t.Setenv("FAKE_CACHE", "abc123")
 		window := time.Hour
 		if c.plain {
-			window = 0
+			window = -1
 		}
 		var log, out strings.Builder
 		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, Cache: shared, Name: "t", RecentViews: window, Log: &log, Verbose: &out})

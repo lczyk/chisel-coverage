@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	goflags "github.com/jessevdk/go-flags"
 	ver "github.com/lczyk/version/go"
@@ -86,17 +85,15 @@ func Main(args []string) int {
 	}
 
 	opts := cuts.Options{
-		Release:     dir,
-		Arches:      arches,
-		Only:        f.Slices,
-		Ignores:     f.Ignores,
-		Keep:        f.Keep,
-		Jobs:        f.Jobs,
-		Cache:       cache.Dir(),
-		Runner:      runner,
-		Log:         os.Stderr,
-		SuiteCache:  true,
-		RecentViews: recentViews,
+		Release: dir,
+		Arches:  arches,
+		Only:    f.Slices,
+		Ignores: f.Ignores,
+		Keep:    f.Keep,
+		Jobs:    f.Jobs,
+		Cache:   cache.Dir(),
+		Runner:  runner,
+		Log:     os.Stderr,
 	}
 	if len(f.Verbose) >= 1 {
 		opts.Verbose = os.Stderr
@@ -150,10 +147,6 @@ type flags struct {
 
 	help bool // -h or --help was given
 }
-
-// recentViews is how lately chisel must have used a blob of its cache for a
-// worker's view of the cache to start with it.
-const recentViews = 72 * time.Hour
 
 func newParser(f *flags) *goflags.Parser {
 	p := goflags.NewNamedParser("chisel-coverage", goflags.HelpFlag|goflags.PassDoubleDash)
