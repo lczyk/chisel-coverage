@@ -128,7 +128,7 @@ mirrors chisel-proxy: `cmd/`, `internal/{cli,coverage}`, a library module under 
 
 the library is `github.com/lczyk/chisel-coverage/pkg`, a module of its own tagged `pkg/vX.Y.Z`, so sister tools (chisel-file, chisel-elftree) drive chisel the same way without copying the pool:
 
-- `pkg/packageslicesfile` -- read a package slices file, strip, synthesise.
+- `pkg/packageslicesfile` -- read a package slices file, strip, pick the slices `--slice` keeps, synthesise.
 - `pkg/cut` -- run one chisel cut, classify its failure and say what chisel named in it (the package, the paths that matched nothing), read the debs fetched and the archives skipped for want of credentials from the log, walk a rootfs.
 - `pkg/cache` -- private views of chisel's cache for concurrent cuts.
 - `pkg/release` -- `--release` as a checkout or a release name fetched by chisel and read from its cache.

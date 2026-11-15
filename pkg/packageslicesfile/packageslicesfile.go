@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -66,6 +67,67 @@ func (d *File) Slice(name string) *Slice {
 		}
 	}
 	return nil
+}
+
+// Select is the slices a --slice list keeps of each file's package, keyed by
+// package, in file order. A nil only keeps every slice and an empty one none.
+// A <package>_<slice> name must name one of the files' packages and a slice
+// it has. A bare name is kept by every package that has it, and a package
+// left with nothing is an error when no package has any name asked of it.
+func Select(files []*File, only []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	if only == nil {
+		for _, f := range files {
+			out[f.Package] = []string{}
+			for _, s := range f.Slices {
+				out[f.Package] = append(out[f.Package], s.Name)
+			}
+		}
+		return out, nil
+	}
+	byPkg := map[string]*File{}
+	for _, f := range files {
+		byPkg[f.Package] = f
+	}
+	asked := map[string][]string{}
+	for _, s := range only {
+		if pkg, name, ok := strings.Cut(s, "_"); ok {
+			f := byPkg[pkg]
+			if f == nil {
+				return nil, fmt.Errorf("--slice %s: package %s is not being checked", s, pkg)
+			}
+			if f.Slice(name) == nil {
+				return nil, fmt.Errorf("%s has no slice %q", pkg, name)
+			}
+			asked[pkg] = append(asked[pkg], name)
+			continue
+		}
+		for _, f := range files {
+			asked[f.Package] = append(asked[f.Package], s)
+		}
+	}
+	anyHas := func(names []string) bool {
+		for _, f := range files {
+			for _, n := range names {
+				if f.Slice(n) != nil {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, f := range files {
+		out[f.Package] = []string{}
+		for _, s := range f.Slices {
+			if slices.Contains(asked[f.Package], s.Name) {
+				out[f.Package] = append(out[f.Package], s.Name)
+			}
+		}
+		if len(asked[f.Package]) > 0 && len(out[f.Package]) == 0 && !anyHas(asked[f.Package]) {
+			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(asked[f.Package], ", "))
+		}
+	}
+	return out, nil
 }
 
 type yamlPath struct {
