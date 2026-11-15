@@ -189,7 +189,8 @@ func missing(output string) (pkg string, paths []string) {
 	return pkg, paths
 }
 
-// skipped is the archives chisel said it ignored, each once, in log order.
+// skipped is the archives chisel said it ignored, each once, sorted: chisel
+// names them in no order of its own, so the log's would differ run to run.
 func skipped(output string) []string {
 	var names []string
 	for _, m := range ignored.FindAllStringSubmatch(output, -1) {
@@ -197,6 +198,7 @@ func skipped(output string) []string {
 			names = append(names, m[1])
 		}
 	}
+	slices.Sort(names)
 	return names
 }
 

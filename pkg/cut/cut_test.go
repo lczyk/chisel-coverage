@@ -228,3 +228,8 @@ func TestBinary(t *testing.T) {
 	t.Setenv("CHISEL", "/opt/chisel")
 	assert.Equal(t, Binary(), "/opt/chisel")
 }
+
+func TestSkippedIsSorted(t *testing.T) {
+	out := "Archive \"ubuntu-esm-infra\" ignored: credentials not found\nArchive \"ubuntu-esm-apps\" ignored: credentials not found\nArchive \"ubuntu-esm-infra\" ignored: credentials not found\n"
+	assert.EqualArrays(t, skipped(out), []string{"ubuntu-esm-apps", "ubuntu-esm-infra"})
+}
