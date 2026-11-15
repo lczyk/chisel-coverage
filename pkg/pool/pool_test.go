@@ -81,7 +81,6 @@ func setup(t *testing.T) *fixture {
 	t.Setenv("FAKE_NA", "")
 	t.Setenv("FAKE_CACHE", "")
 	t.Setenv("FAKE_PROXY", "")
-	t.Setenv(PlainEnv, "")
 	t.Setenv("FAKE_HOMES", filepath.Join(tmp, "homes"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "xdg"))
 	return f
@@ -420,18 +419,14 @@ func TestResolveArches(t *testing.T) {
 }
 
 // With SuiteCache every cut of the run is pointed at the pool's one proxy,
-// over a proxy setting of the user's own, and at none when the user asks
-// for plain cuts.
+// over a proxy setting of the user's own, and without it at the user's.
 func TestSuiteCache(t *testing.T) {
 	for _, plain := range []bool{false, true} {
 		f := setup(t)
 		seen := filepath.Join(t.TempDir(), "proxy")
 		t.Setenv("FAKE_PROXY", seen)
 		t.Setenv("http_proxy", "http://user.example:3128")
-		if plain {
-			t.Setenv(PlainEnv, "1")
-		}
-		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, SuiteCache: true})
+		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, SuiteCache: !plain})
 		assert.NoError(t, err)
 		err = p.Pass([]Group{group("rel", "amd64", "bash_a", "bash_b"), group("rel", "arm64", "bash_a")}, func(c Cut) bool {
 			assert.NoError(t, c.Err)
@@ -459,7 +454,8 @@ func TestSuiteCache(t *testing.T) {
 
 // With RecentViews a view starts without the blobs not used of late. A cut
 // that fails for the lack of one is cut again in a whole view, so the run
-// ends as it would have with whole views, and plain cuts never start thin.
+// ends as it would have with whole views, and without it no view starts
+// thin.
 func TestRecentViews(t *testing.T) {
 	for _, c := range []struct {
 		name          string
@@ -468,7 +464,7 @@ func TestRecentViews(t *testing.T) {
 	}{
 		{name: "needs an old blob", old: true, again: true},
 		{name: "needs a recent blob", blobs1: true},
-		{name: "plain", old: true, plain: true},
+		{name: "whole views", old: true, plain: true},
 	} {
 		f := setup(t)
 		shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
@@ -483,11 +479,12 @@ func TestRecentViews(t *testing.T) {
 			assert.NoError(t, os.Chtimes(filepath.Join(dir, "abc123"), old, old))
 		}
 		t.Setenv("FAKE_CACHE", "abc123")
+		window := time.Hour
 		if c.plain {
-			t.Setenv(PlainEnv, "1")
+			window = 0
 		}
 		var log, out strings.Builder
-		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, Cache: shared, Name: "t", RecentViews: time.Hour, Log: &log, Verbose: &out})
+		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, Cache: shared, Name: "t", RecentViews: window, Log: &log, Verbose: &out})
 		assert.NoError(t, err)
 		err = p.Pass([]Group{
 			group("rel", "amd64", "bash_a", "bash_b", "bash_c"),

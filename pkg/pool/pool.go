@@ -38,7 +38,6 @@ type Options struct {
 	Temp string
 	// SuiteCache has the cuts fetch each suite's InRelease once a run and
 	// not once a cut, through a proxy of the pool's own, see suitecache.
-	// Off, whatever it says, when $CHISEL_POOL_PLAIN is set.
 	SuiteCache bool
 	// RecentViews, when not zero, seeds a worker's view of the cache with
 	// only the blobs chisel used within it, not with every one, which for
@@ -48,8 +47,7 @@ type Options struct {
 	// a view not whole is cut again in a whole one, so a failure is never
 	// the view's. The first such view cuts one unit before any other is
 	// made, so a cache that is cold for the run costs one worker's
-	// fetches and not every worker's. Off, whatever it says, when
-	// $CHISEL_POOL_PLAIN is set.
+	// fetches and not every worker's.
 	RecentViews time.Duration
 	Log         io.Writer // notices (--keep, cache trouble); nil discards
 	Verbose     io.Writer // one line per cut; nil discards
@@ -139,9 +137,6 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 		return nil, err
 	}
 	p.work = work
-	if plain() {
-		p.opts.SuiteCache, p.opts.RecentViews = false, 0
-	}
 	if p.jobs > 1 && opts.Cache != "" {
 		p.viewCost = cache.CostRecent(opts.Cache, p.opts.RecentViews)
 	}
@@ -406,13 +401,6 @@ func (p *Pool) worker(isolate bool) *worker {
 	}
 	return w
 }
-
-// PlainEnv is the environment variable that, set to anything, has every
-// pool cut the plain way, without what Options offers to make a run faster:
-// the user's way out when one of those is suspected of a wrong result.
-const PlainEnv = "CHISEL_POOL_PLAIN"
-
-func plain() bool { return os.Getenv(PlainEnv) != "" }
 
 // prepare gives an isolated worker its view before its first unit: one an
 // earlier worker left when there is one, else a new one, logged like a cut

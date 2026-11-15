@@ -86,16 +86,15 @@ func Main(args []string) int {
 	}
 
 	opts := cuts.Options{
-		Release: dir,
-		Arches:  arches,
-		Only:    f.Slices,
-		Ignores: f.Ignores,
-		Keep:    f.Keep,
-		Jobs:    f.Jobs,
-		Cache:   cache.Dir(),
-		Runner:  runner,
-		Log:     os.Stderr,
-		// Both are off with $CHISEL_POOL_PLAIN set.
+		Release:     dir,
+		Arches:      arches,
+		Only:        f.Slices,
+		Ignores:     f.Ignores,
+		Keep:        f.Keep,
+		Jobs:        f.Jobs,
+		Cache:       cache.Dir(),
+		Runner:      runner,
+		Log:         os.Stderr,
 		SuiteCache:  true,
 		RecentViews: recentViews,
 	}
