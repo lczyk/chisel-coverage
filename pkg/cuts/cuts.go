@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -90,7 +89,6 @@ type prepared struct {
 	slices []string // real slices considered
 	cuts   []string // slices to cut, the lead first
 	rel    *temprelease.Release
-	only   []string // the bare --slice names asked of this package, nil for all
 }
 
 type run struct {
@@ -136,7 +134,18 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s is not a chisel release: %w", opts.Release, err)
 	}
-	only, err := resolveOnly(opts.Only, pkgs)
+	var defs []*packageslicesfile.File
+	for _, pkg := range pkgs {
+		def, err := packageslicesfile.Read(opts.Release, pkg)
+		if errors.Is(err, fs.ErrNotExist) && opts.Optional {
+			def, err = &packageslicesfile.File{Package: pkg}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		defs = append(defs, def)
+	}
+	keep, err := packageslicesfile.Select(defs, opts.Only)
 	if err != nil {
 		return nil, err
 	}
@@ -146,22 +155,19 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 		r.names = packageslicesfile.DefaultPrefix
 	}
 	defer r.cleanup()
-	for _, pkg := range pkgs {
-		p, err := r.prepare(chiselYAML, pkg, only[pkg])
+	for _, def := range defs {
+		// Nil keeps every slice, as Synthesise takes it.
+		var k []string
+		if opts.Only != nil {
+			k = keep[def.Package]
+		}
+		p, err := r.prepare(chiselYAML, def, k)
 		if err != nil {
 			return nil, err
 		}
 		r.prepared = append(r.prepared, p)
-		r.results = append(r.results, Package{Name: pkg, Slices: p.slices, Arches: make([]Arch, len(opts.Arches))})
+		r.results = append(r.results, Package{Name: def.Package, Slices: p.slices, Arches: make([]Arch, len(opts.Arches))})
 		r.cells = append(r.cells, make([]cell, len(opts.Arches)))
-	}
-	// A bare --slice name is kept only where it exists, so a package may
-	// end up with nothing to cut; that is an error only when no package
-	// being checked has any of the names.
-	for _, p := range r.prepared {
-		if len(p.only) > 0 && len(p.slices) == 0 && !r.anyExists(p.only) {
-			return nil, fmt.Errorf("no package being checked has a slice named %s", strings.Join(p.only, ", "))
-		}
 	}
 	r.pool, err = pool.New(ctx, pool.Options{Jobs: opts.Jobs, Cache: opts.Cache, Runner: opts.Runner, Keep: opts.Keep, Name: string(r.names), Log: opts.Log, Verbose: opts.Verbose})
 	if err != nil {
@@ -211,61 +217,10 @@ func unique(in []string) []string {
 	return out
 }
 
-// resolveOnly maps each package to the slices --slice keeps for it. A package
-// absent from the map is unrestricted; a nil only leaves every package so,
-// an empty one keeps no slice anywhere. A bare name applies to every
-// package that has it and must exist in at least one; a <package>_<slice>
-// name must name a listed package.
-func resolveOnly(only, pkgs []string) (map[string][]string, error) {
-	if only == nil {
-		return nil, nil
-	}
-	listed := map[string]bool{}
-	for _, p := range pkgs {
-		listed[p] = true
-	}
-	out := map[string][]string{}
-	for _, p := range pkgs {
-		out[p] = []string{}
-	}
-	for _, s := range only {
-		if pkg, name, ok := strings.Cut(s, "_"); ok {
-			if !listed[pkg] {
-				return nil, fmt.Errorf("--slice %s: package %s is not being checked", s, pkg)
-			}
-			out[pkg] = append(out[pkg], name)
-			continue
-		}
-		for _, p := range pkgs {
-			out[p] = append(out[p], s)
-		}
-	}
-	return out, nil
-}
-
-func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, error) {
-	def, err := packageslicesfile.Read(r.opts.Release, pkg)
-	if errors.Is(err, fs.ErrNotExist) && r.opts.Optional {
-		def, err = &packageslicesfile.File{Package: pkg}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var keep []string
-	if only != nil {
-		// A bare --slice name is kept only where it exists; a prefixed one
-		// must exist.
-		for _, name := range only {
-			if def.Slice(name) != nil {
-				keep = append(keep, name)
-			} else if r.prefixed(pkg + "_" + name) {
-				return nil, fmt.Errorf("%s has no slice %q", pkg, name)
-			}
-		}
-		if keep == nil {
-			keep = []string{}
-		}
-	}
+// prepare synthesises def's file and its release, keep being the slices to
+// cut, every one when nil.
+func (r *run) prepare(chiselYAML []byte, def *packageslicesfile.File, keep []string) (*prepared, error) {
+	pkg := def.Package
 	file, cuts, err := packageslicesfile.Synthesise(def, keep, r.opts.Ignores, r.names)
 	if err != nil {
 		return nil, err
@@ -288,28 +243,13 @@ func (r *run) prepare(chiselYAML []byte, pkg string, only []string) (*prepared, 
 	if r.opts.Keep {
 		r.logf("release for %s: %s", pkg, rel.Dir)
 	}
-	p := &prepared{def: def, cuts: cuts, rel: rel, only: only}
+	p := &prepared{def: def, cuts: cuts, rel: rel}
 	for _, s := range def.Slices {
 		if keep == nil || slices.Contains(keep, s.Name) {
 			p.slices = append(p.slices, s.Name)
 		}
 	}
 	return p, nil
-}
-
-func (r *run) prefixed(name string) bool { return slices.Contains(r.opts.Only, name) }
-
-// anyExists reports whether some package being checked has a slice of one
-// of the names.
-func (r *run) anyExists(names []string) bool {
-	for _, name := range names {
-		for _, p := range r.prepared {
-			if p.def.Slice(name) != nil {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // Jobs is pool.Jobs.

@@ -189,3 +189,37 @@ func paths(s *Slice) []string {
 	}
 	return out
 }
+
+func TestSelect(t *testing.T) {
+	files := []*File{
+		{Package: "bash", Slices: []Slice{{Name: "config"}, {Name: "bins"}, {Name: "copyright"}}},
+		{Package: "dash", Slices: []Slice{{Name: "bins"}, {Name: "copyright"}}},
+	}
+	got, err := Select(files, nil)
+	assert.NoError(t, err)
+	assert.EqualArrays(t, got["bash"], []string{"config", "bins", "copyright"})
+	assert.EqualArrays(t, got["dash"], []string{"bins", "copyright"})
+
+	got, err = Select(files, []string{})
+	assert.NoError(t, err)
+	assert.EqualArrays(t, got["bash"], []string{})
+	assert.EqualArrays(t, got["dash"], []string{})
+
+	// In file order, whatever the order asked; a bare name only where it
+	// exists; a prefixed one only for its package.
+	got, err = Select(files, []string{"copyright", "bins", "bash_config", "bins"})
+	assert.NoError(t, err)
+	assert.EqualArrays(t, got["bash"], []string{"config", "bins", "copyright"})
+	assert.EqualArrays(t, got["dash"], []string{"bins", "copyright"})
+	got, err = Select(files, []string{"config"})
+	assert.NoError(t, err)
+	assert.EqualArrays(t, got["bash"], []string{"config"})
+	assert.EqualArrays(t, got["dash"], []string{})
+
+	_, err = Select(files, []string{"bash_nope"})
+	assert.Error(t, err, `bash has no slice "nope"`)
+	_, err = Select(files, []string{"zsh_bins"})
+	assert.Error(t, err, "--slice zsh_bins: package zsh is not being checked")
+	_, err = Select(files, []string{"nope"})
+	assert.Error(t, err, "no package being checked has a slice named nope")
+}
