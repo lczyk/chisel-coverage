@@ -21,6 +21,7 @@ import (
 
 	"github.com/lczyk/chisel-coverage/pkg/cache"
 	"github.com/lczyk/chisel-coverage/pkg/cut"
+	"github.com/lczyk/chisel-coverage/pkg/suitecache"
 )
 
 // Options configures a pool.
@@ -34,9 +35,13 @@ type Options struct {
 	Name string
 	// Temp is the pattern of the work dir, as os.MkdirTemp takes it;
 	// "chisel-coverage-*" when empty.
-	Temp    string
-	Log     io.Writer // notices (--keep, cache trouble); nil discards
-	Verbose io.Writer // one line per cut; nil discards
+	Temp string
+	// SuiteCache has the cuts fetch each suite's InRelease once a run and
+	// not once a cut, through a proxy of the pool's own, see suitecache.
+	// Off, whatever it says, when $CHISEL_POOL_PLAIN is set.
+	SuiteCache bool
+	Log        io.Writer // notices (--keep, cache trouble); nil discards
+	Verbose    io.Writer // one line per cut; nil discards
 }
 
 // Unit is one cut to run.
@@ -89,8 +94,9 @@ type Pool struct {
 	logMu    sync.Mutex    // the Log and Verbose writers
 	seeding  sync.Mutex    // views are seeded one at a time, see worker
 	views    []*cache.View // idle views, for the next worker
-	dirs     int           // rootfs dirs numbered so far
-	cuts     int           // the totals, for the summary line
+	suites   *suitecache.Proxy
+	dirs     int // rootfs dirs numbered so far
+	cuts     int // the totals, for the summary line
 	paths    int
 	bytes    int64
 }
@@ -119,6 +125,15 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 		return nil, err
 	}
 	p.work = work
+	if plain() {
+		p.opts.SuiteCache = false
+	}
+	if p.opts.SuiteCache {
+		// Without it the cuts go to the archive themselves, as ever.
+		if p.suites, err = suitecache.Start(); err != nil {
+			p.logf("suite cache: %v; every cut fetches its own", err)
+		}
+	}
 	if opts.Keep {
 		p.logf("rootfs dirs: %s", p.work)
 	}
@@ -249,6 +264,9 @@ func (p *Pool) Summary() {
 // Close waits for the rootfs removals and removes the views and, without
 // Options.Keep, the work dir.
 func (p *Pool) Close() {
+	if p.suites != nil {
+		_ = p.suites.Close()
+	}
 	p.rm.Wait()
 	p.removeViews()
 	if !p.opts.Keep {
@@ -365,8 +383,19 @@ func finish(work time.Duration, k, free int, seed time.Duration) time.Duration {
 // worker makes a worker, isolated in a view of the cache when asked to and
 // there is a cache dir.
 func (p *Pool) worker(isolate bool) *worker {
-	return &worker{p: p, runner: *p.opts.Runner, isolate: isolate && p.opts.Cache != ""}
+	w := &worker{p: p, runner: *p.opts.Runner, isolate: isolate && p.opts.Cache != ""}
+	if p.suites != nil {
+		w.runner.HTTPProxy = p.suites.URL
+	}
+	return w
 }
+
+// PlainEnv is the environment variable that, set to anything, has every
+// pool cut the plain way, without what Options offers to make a run faster:
+// the user's way out when one of those is suspected of a wrong result.
+const PlainEnv = "CHISEL_POOL_PLAIN"
+
+func plain() bool { return os.Getenv(PlainEnv) != "" }
 
 // prepare gives an isolated worker its view before its first unit: one an
 // earlier worker left when there is one, else a new one, logged like a cut

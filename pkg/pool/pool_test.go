@@ -27,9 +27,11 @@ import (
 // chisel's cache: it fails unless blob $FAKE_CACHE is in
 // $XDG_CACHE_HOME/chisel/sha256/, then writes a blob named after the cut
 // there and appends "<home> <arch> <slice>" to $FAKE_HOMES. With $FAKE_ARGS
-// set it appends its arguments there, a cut a line.
+// set it appends its arguments there, a cut a line, and with $FAKE_PROXY set
+// the http_proxy and HTTP_PROXY it ran with.
 const fakeChisel = `#!/bin/sh
 [ -n "$FAKE_ARGS" ] && printf '%s\n' "$*" >> "$FAKE_ARGS"
+[ -n "$FAKE_PROXY" ] && printf '%s %s\n' "$http_proxy" "$HTTP_PROXY" >> "$FAKE_PROXY"
 slice=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,6 +80,8 @@ func setup(t *testing.T) *fixture {
 	t.Setenv("FAKE_FAIL", "")
 	t.Setenv("FAKE_NA", "")
 	t.Setenv("FAKE_CACHE", "")
+	t.Setenv("FAKE_PROXY", "")
+	t.Setenv(PlainEnv, "")
 	t.Setenv("FAKE_HOMES", filepath.Join(tmp, "homes"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "xdg"))
 	return f
@@ -413,4 +417,42 @@ func TestResolveArches(t *testing.T) {
 
 	_, err = ResolveArches([]string{"vax"})
 	assert.Error(t, err, `invalid architecture "vax"`)
+}
+
+// With SuiteCache every cut of the run is pointed at the pool's one proxy,
+// over a proxy setting of the user's own, and at none when the user asks
+// for plain cuts.
+func TestSuiteCache(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		f := setup(t)
+		seen := filepath.Join(t.TempDir(), "proxy")
+		t.Setenv("FAKE_PROXY", seen)
+		t.Setenv("http_proxy", "http://user.example:3128")
+		if plain {
+			t.Setenv(PlainEnv, "1")
+		}
+		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, SuiteCache: true})
+		assert.NoError(t, err)
+		err = p.Pass([]Group{group("rel", "amd64", "bash_a", "bash_b"), group("rel", "arm64", "bash_a")}, func(c Cut) bool {
+			assert.NoError(t, c.Err)
+			return true
+		})
+		assert.NoError(t, err)
+		p.Close()
+		b, err := os.ReadFile(seen)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		assert.Len(t, lines, 3)
+		for _, l := range lines {
+			if plain {
+				assert.Equal(t, strings.TrimSpace(l), "http://user.example:3128")
+				continue
+			}
+			assert.Equal(t, l, lines[0])
+			assert.That(t, regexp.MustCompile(`^(http://127\.0\.0\.1:\d+) (http://127\.0\.0\.1:\d+)$`).MatchString(l), l)
+			assert.Equal(t, strings.Fields(l)[0], strings.Fields(l)[1])
+		}
+		// The caller's runner is not the pool's to change.
+		assert.Equal(t, f.runner.HTTPProxy, "")
+	}
 }

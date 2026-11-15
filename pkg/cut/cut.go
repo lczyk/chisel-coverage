@@ -37,6 +37,8 @@ type Runner struct {
 	Bin       string
 	Verbose   io.Writer
 	CacheHome string
+	// HTTPProxy, when set, is the http_proxy chisel runs with.
+	HTTPProxy string
 }
 
 // Deb is a package a cut fetched, read from chisel's Fetching line.
@@ -215,8 +217,16 @@ func (r *Runner) command(ctx context.Context, args []string, prefix string) (*ex
 	cmd := exec.CommandContext(ctx, r.Bin, args...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 5 * time.Second
+	if r.CacheHome != "" || r.HTTPProxy != "" {
+		cmd.Env = os.Environ()
+	}
 	if r.CacheHome != "" {
-		cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+r.CacheHome)
+		cmd.Env = append(cmd.Env, "XDG_CACHE_HOME="+r.CacheHome)
+	}
+	if r.HTTPProxy != "" {
+		// Both spellings: go reads the lower case one first, and a
+		// user's own setting must not win over the run's.
+		cmd.Env = append(cmd.Env, "http_proxy="+r.HTTPProxy, "HTTP_PROXY="+r.HTTPProxy)
 	}
 	out := &bytes.Buffer{}
 	var w io.Writer = out
