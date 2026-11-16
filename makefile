@@ -46,6 +46,10 @@ test:  ## Run the unit tests with the race detector (real chisel ones skip witho
 e2e:  ## Run the end-to-end test (needs `chisel` + network; override CHISEL=..)
 	CHISEL_COVERAGE_E2E=1 go test -tags e2e -count=1 -v ./e2e/...
 
+.PHONY: fizz
+fizz:  ## Model-check pkg/pool/views.fizz (needs fizzbee): three configurations pass, two designs fail
+	@sh pkg/pool/views.sh
+
 .PHONY: lint
 lint:  ## go vet + staticcheck + deadcode + gofmt check (no writes)
 	@for m in $(MODULES); do \

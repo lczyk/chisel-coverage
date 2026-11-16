@@ -1,0 +1,518 @@
+---
+deadlock_detection: true
+options:
+  max_actions: 400
+  crash_on_yield: false
+---
+# views.fizz -- a fizzbee model of how a pool's workers come by their views of
+# chisel's cache during one Pass: the probing view, the workers that wait for
+# it, views seeded in part ("thin") and made whole, a blob fetched again, and
+# a cut that is cut again in a whole view. pool.go and ../cache/cache.go are
+# the code; this is not a transcription of them and proves nothing of them
+# line by line. It checks the protocol they are meant to follow.
+#
+# three configurations, since one of everything is more states than the
+# checker gets through (480k and counting after 25 minutes):
+#   views (as written): two groups of a lead and one unit, no group is
+#     stopped, every outcome and need. Retry, a blob fetched again, views
+#     made whole, the probe. 25279 states.
+#   stops: one group of a lead and two units and a lone lead, one stop,
+#     clean cuts but for what they need. The skip, the prober that cuts
+#     nothing (D1), letting go. 97456 states.
+#   later: as stops with a unit after the second lead and no old blob
+#     needed: the prober that let go cuts again. 27354 states.
+#
+# run:   make fizz    (the three, and the two designs that must fail)
+# by hand, fizzbee 0.5.4:
+#   timeout -k 10 600 fizz views.fizz
+#   timeout -k 10 600 fizz --preinit-hook "$STOPS" views.fizz
+# with STOPS the lines   GROUPS = [2, 0]   MAX_STOPS = 1   KINDS = ["ok"]
+# later is GROUPS = [2, 1] and a line more, NEEDS = ["recent"]. A design
+# that must fail is the stops configuration and a line more:
+#   FIX = "none"      a deadlock: the pass hangs (R2)
+#   FIX = "release"   fails R3
+#
+# requirements
+#
+# R1:  THE POOL SHALL hand every unit it cuts to the caller once, with the
+#      result the unit has on its own: what the cut does in a view of every
+#      blob the shared cache had when the view was seeded. It never hands
+#      on a failure for such a blob the view lacked.
+# R2:  THE POOL SHALL finish a pass: every worker ends, whatever the units
+#      need, the network does and the caller answers, as long as every cut
+#      and every callback returns.
+# R3:  WHILE no view seeded in part has cut a unit and merged, THE POOL
+#      SHALL make no second view seeded in part.
+# R4:  IF the probing view's first cut lacked a blob the shared cache had,
+#      THEN THE POOL SHALL seed no other view in part.
+# R5:  WHEN a worker has seen that views are to be whole, THE POOL SHALL
+#      not cut in that worker's view while it is seeded in part.
+# R6:  THE POOL SHALL let at most one cut a worker lack a blob the shared
+#      cache had when the worker's view was seeded.
+# R7:  THE POOL SHALL skip a unit only when its group was stopped, and
+#      once views are to be whole they stay so.
+#
+# invariants: R1, R3, R4, R5, R6, R7. progress: R2. R1 is also read at the
+# end of the pass, where every unit is cut, skipped or was never queued.
+#
+# the boundary
+#
+# system: the workers' loop of Pass, worker.prepare, cut, whole, merge,
+# proved and close, and the pool's whole flag and probed channel.
+# environment: what a unit needs (a blob used of late, or an old one the
+# shared cache has), what the unit's own cut does (ok, a failure of its
+# own, a failure for what the archives hold), the network (up or down, as
+# it likes, read once by each cut), and the caller stopping a unit's group.
+#
+# assumptions, each a thing the code can meet and the model does not
+#
+# - a fresh pool with a positive window: no view is left from an earlier
+#   pass, so prepare's first case is only "views are to be whole".
+# - every cut and every callback returns.
+# - the shared cache only grows during the pass: a blob it has stays. So a
+#   blob it had at the start is "of late" or "old" for the whole pass. A
+#   blob another worker fetches and merges during the pass is in no view
+#   seeded before, thin or whole, and Complete does not bring it: a cut
+#   needing it fetches it for itself, as it always did in a view, and that
+#   is the unit's own outcome here, not a blob the view lacked.
+# - the cache's links succeed and the view is on the shared cache's
+#   filesystem: Complete makes a view that lacks nothing. A link that
+#   fails otherwise, or a view that copies, is a view lacking blobs that
+#   says it is whole, and a cut in it fetches or fails as chisel does in
+#   any cache.
+# - a unit's own outcome is the same each time it is cut in a view of
+#   every blob, and the archives say the same thing all pass.
+#
+# abstractions
+#
+# - GROUPS groups, each a lead and so many units after it. A lead is never
+#   skipped. The second group has a unit after its lead so that a worker
+#   whose unit of the first was skipped has something left to cut.
+# - worker 0 cuts in the shared cache and has no view. The others are
+#   isolated and get a view on their first unit.
+# - a view is "thin" (seeded in part and lacking the old blobs) or "whole".
+#   A thin view that happens to lack nothing is a whole one here.
+# - a unit cut in the shared cache or in a whole view is "ok": its own
+#   failures take no branch of the protocol there. In a thin view it is
+#   "ok" or "bad", a failure of its own, which is cut again. A failure for
+#   what the archives hold is not cut again and goes the way of "ok".
+# - a blob fetched again is a flag on the view until the merge sees it, or
+#   until Complete links the blob in and the merge no longer can.
+#
+# what an atomic step merges
+#
+# every step of a worker is one atomic block of the one Step action, a
+# worker picked without order among those that can move. A step holds at
+# most one read or write of what workers share (the queue and its count,
+# stopped, whole, probed), or several that no other worker's step can come
+# between to any effect; what else it does is the worker's own. Each stands
+# for:
+# - take: one receive from the queue.
+# - prepare: the first p.mu section of prepare (probe, wait or neither)
+#   and, for a worker that does not wait, the second, where whole is
+#   read, then p.seeding held over cache.NewRecent. Between the two
+#   sections whole can only have turned true through a view seeded in
+#   part: the prober has the only one and has not cut, and a worker that
+#   saw whole true sees it true again. The view is the worker's own
+#   until it has it, and what NewRecent reads of the shared cache is
+#   fixed by the assumption above.
+# - wait: the receive from probed, then the second p.mu section and the
+#   seeding, as above. whole turning true between the wake and the read
+#   is the same as the wake coming after it.
+# - skipcheck: the pm section reading stopped. A worker whose view is not
+#   seeded in part goes from here to done: its cut reads and writes
+#   nothing shared.
+# - cut: whole(false), then one chisel in the view, start to end, and
+#   cuts set. whole(false) reads p.whole under p.mu, drops the lock, and
+#   Completes the worker's own view; the chisel then runs in it. The one
+#   shared read is of whole, at the start: whoever sets whole later is
+#   after the step, which is the code's "before its next cut". The
+#   network is read once, by the chisel. What a chisel does in its own
+#   view no one sees until the merge.
+# - retry: whole(true), p.whole set under p.mu, then Complete, then the
+#   second chisel. The one shared write is of whole, at the start; the
+#   rest is in the worker's own view, by now whole, where no blob is
+#   lacking and the network is not asked.
+# - done: the caller's callback and the pm section setting stopped. The
+#   callback does nothing here but decide, so its place is the set.
+# - merge: View.Merge, then the p.mu section of merge setting whole.
+#   Merge's links into the shared cache are the growth assumed above, and
+#   what it finds is the worker's own.
+# - enditem: proved, the close of the channel, then the last pm section
+#   of the loop with its sends to the queue. A worker let go by the close
+#   reads whole and seeds, a worker at the queue reads the queue: neither
+#   reads what the other half writes. Merging them does fix an order the
+#   code leaves open, of this worker's sends against those of a worker
+#   let go that ends its unit first: which unit a worker gets and when a
+#   callback comes, on which no requirement here stands. A worker
+#   receiving a unit before pending is counted cannot end its own unit
+#   until pm is free.
+# - close: worker.close: its merge, which finds nothing new since every
+#   unit was merged, proved, and the view handed back.
+# merge and enditem are two steps on purpose: whole set, then probed
+# closed, is the order R3 and R4 stand on.
+#
+# not modelled: the context being cancelled, a view that cannot be made, a
+# second Pass reusing the views, Serial, the sizing of a pass, and what the
+# assumptions above set aside.
+#
+# decisions the model forced
+#
+# D1: a probing worker whose unit is skipped, its group stopped while the
+#     view was seeded, has not cut and so did not prove. The workers
+#     waiting for it hold units, the queue runs dry and never closes: the
+#     pass hangs. FIX "none" is that design and fails R2. FIX "release"
+#     lets the waiters go without a proof: they seed in part, and R3
+#     fails. FIX "whole" is the one kept: a prober that merges without
+#     having cut says views are to be whole, then lets the waiters go.
+#     pool.go was "none" when this was written; the test
+#     TestProbeThatCutsNothingLetsGo pins "whole".
+# D2: a oneof assigned straight to a field of a record in a list
+#     (workers[i].outcome = oneof KINDS) does not reach the record in
+#     fizzbee 0.5.4. It goes through a local.
+#
+# mutation runs, each a change to the model and the assertion that then
+# fails; the first five are MUTANT values, the rest edits of a copy:
+#   no_retry         a failed cut in a thin view is not cut again    R1 ResultIsTheUnitsOwn
+#   retry_forgets    the second cut says ok whatever the first said  R1 ResultIsTheUnitsOwn
+#   no_complete      a view is not made whole before a cut           R5 NoThinCutOnceWholeSeen
+#   no_merge_whole   a merge finding a blob fetched again is silent  R4 ColdProbeSeedsNoOtherThin
+#   close_first      probed is closed before whole is said           R4 ColdProbeSeedsNoOtherThin
+#   a fetch leaves no mark for the merge (and R4 off)                R6 OneDirtyCutAWorker
+#   a unit is skipped though its group goes on                       R7 SkippedOnlyWhenStopped
+#   whole is unsaid at the end                                       R7 WholeStays
+#   a unit is queued a second time                                   R1 HandedOnOnce
+#   the units after a lead are never queued                          R1 EveryUnitAccountedFor
+#   FIX "none"                                                       R2, as a deadlock
+#   FIX "release"                                                    R3 OneThinViewUntilProven
+
+W = 3            # workers, the first without a view
+GROUPS = [1, 1]  # per group, the units after its lead
+KINDS = ["ok", "bad"]
+MAX_STOPS = 0
+FIX = "whole"    # or "none", "release"
+MUTANT = ""      # for the mutation runs: no_retry, no_complete, no_merge_whole,
+                 # retry_forgets, close_first
+
+NEEDS = ["recent", "old"]
+
+# plan is every unit as (group, is the lead).
+def plan(groups):
+    out = []
+    for g in range(len(groups)):
+        for k in range(groups[g] + 1):
+            out.append((g, k == 0))
+    return out
+
+def movable(w, queue, closed, probed):
+    if w.pc == "idle":
+        return len(queue) > 0 or closed
+    if w.pc == "wait":
+        return probed == "closed"
+    return w.pc != "exit"
+
+def all_exit(workers):
+    return len([w for w in workers if w.pc != "exit"]) == 0
+
+action Init:
+    # state: new, taken, cut (handed on), skipped
+    units = [record(g=x[0], lead=x[1], state="new") for x in plan(GROUPS)]
+    # outcome is what the worker's chisel last said: "", ok, bad, missing
+    workers = [record(pc="idle", item=-1, isolate=(i > 0), view="none", probe=False, was_probe=False,
+                      cuts=False, pending=False, refetched=False, outcome="", own="", let_go=False,
+                      owes_whole=False, dirty=0) for i in range(W)]
+    queue = [u for u in range(len(units)) if units[u].lead]
+    closed = False
+    pending = len(GROUPS)
+    stopped = [False for g in GROUPS]
+    lead_stopped = [False for g in GROUPS]   # the group's lead was what stopped it
+    stops = 0
+    whole = False
+    probed = "nil"       # nil, open, closed
+    # witnesses: each stays as it is in a model that keeps its requirement
+    handed = [False for x in units]   # per unit: it reached the caller
+    handed_twice = False       # a unit reached the caller a second time
+    missing_handed_on = False  # a failure for a lacking blob reached the caller
+    own_lost = False           # a unit's own failure did not reach the caller
+    thin_made = 0              # views seeded in part
+    probe_dirty = False        # the probing view's first cut lacked a blob, whenever it came
+    proven = False             # a view seeded in part has cut a unit and merged
+    late_thin_cut = False      # a cut in a thin view by a worker that had seen whole
+
+atomic fair action Step:
+    i = oneof [j for j in range(W) if movable(workers[j], queue, closed, probed)]
+    pc = workers[i].pc
+    u = workers[i].item
+    if pc == "idle":
+        if len(queue) > 0:
+            workers[i].item = queue[0]
+            units[queue[0]].state = "taken"
+            queue = queue[1:]
+            if workers[i].isolate:
+                workers[i].pc = "prepare"
+            else:
+                workers[i].pc = "skipcheck"
+        else:
+            workers[i].pc = "close"
+    elif pc == "prepare":
+        workers[i].isolate = False
+        if whole:
+            workers[i].view = "whole"
+            workers[i].pc = "skipcheck"
+        elif probed == "nil":
+            probed = "open"
+            workers[i].probe = True
+            workers[i].was_probe = True
+            workers[i].view = "thin"
+            thin_made = thin_made + 1
+            workers[i].pc = "skipcheck"
+        else:
+            workers[i].pc = "wait"
+    elif pc == "wait":
+        if whole:
+            workers[i].view = "whole"
+        else:
+            workers[i].view = "thin"
+            thin_made = thin_made + 1
+        workers[i].pc = "skipcheck"
+    elif pc == "skipcheck":
+        if stopped[units[u].g]:
+            units[u].state = "skipped"
+            if workers[i].view == "none":
+                workers[i].pc = "enditem"
+            else:
+                workers[i].pc = "merge"
+        elif workers[i].view == "thin":
+            workers[i].pc = "cut"
+        else:
+            workers[i].cuts = True
+            workers[i].outcome = "ok"
+            workers[i].pc = "done"
+    elif pc == "cut":
+        saw_whole = whole
+        if saw_whole and MUTANT != "no_complete":
+            workers[i].view = "whole"
+        first = not workers[i].cuts
+        workers[i].cuts = True
+        outcome = "ok"
+        if workers[i].view == "thin":
+            if saw_whole:
+                late_thin_cut = True
+            outcome = oneof KINDS
+            needs = oneof NEEDS
+            if needs == "old":
+                workers[i].dirty = workers[i].dirty + 1
+                if workers[i].was_probe and first:
+                    probe_dirty = True
+                net_up = oneof [True, False]
+                if net_up:
+                    workers[i].pending = True
+                else:
+                    outcome = "missing"
+        workers[i].outcome = outcome
+        if outcome == "bad":
+            workers[i].own = "bad"
+        if workers[i].view == "thin" and outcome != "ok" and MUTANT != "no_retry":
+            workers[i].pc = "retry"
+        else:
+            workers[i].pc = "done"
+    elif pc == "retry":
+        whole = True
+        workers[i].view = "whole"
+        # Complete links in what was fetched again: the merge no longer
+        # sees it. In the whole view the unit's own outcome is what is left.
+        workers[i].pending = False
+        if workers[i].outcome == "missing":
+            # through a local: a oneof assigned straight to a record's
+            # field does not reach the record
+            own = oneof KINDS
+            workers[i].outcome = own
+        if MUTANT == "retry_forgets":
+            workers[i].outcome = "ok"
+        workers[i].pc = "done"
+    elif pc == "done":
+        if handed[u]:
+            handed_twice = True
+        handed[u] = True
+        units[u].state = "cut"
+        if workers[i].outcome == "missing":
+            missing_handed_on = True
+        if workers[i].own == "bad" and workers[i].outcome != "bad":
+            own_lost = True
+        workers[i].outcome = ""
+        workers[i].own = ""
+        stop = oneof ([False, True] if stops < MAX_STOPS else [False])
+        if stop:
+            stopped[units[u].g] = True
+            stops = stops + 1
+            if units[u].lead:
+                lead_stopped[units[u].g] = True
+        if workers[i].view == "none":
+            workers[i].pc = "enditem"
+        else:
+            workers[i].pc = "merge"
+    elif pc == "merge":
+        if workers[i].pending:
+            workers[i].pending = False
+            workers[i].refetched = True
+        say_whole = False
+        if workers[i].refetched and MUTANT != "no_merge_whole":
+            say_whole = True
+        if FIX == "whole" and workers[i].probe and not workers[i].cuts:
+            say_whole = True
+        # A view seeded in part has cut and merged: the proof, whoever
+        # closes the channel and whenever.
+        if workers[i].probe and workers[i].cuts:
+            proven = True
+        if MUTANT == "close_first":
+            # the channel closed here, whole only said at the next step
+            workers[i].owes_whole = say_whole
+            if workers[i].probe and (workers[i].cuts or FIX != "none"):
+                if not workers[i].cuts:
+                    workers[i].let_go = True
+                workers[i].probe = False
+                probed = "closed"
+        elif say_whole:
+            whole = True
+        workers[i].pc = "enditem"
+    elif pc == "enditem":
+        if workers[i].owes_whole:
+            workers[i].owes_whole = False
+            whole = True
+        if workers[i].probe:
+            if workers[i].cuts:
+                workers[i].probe = False
+                probed = "closed"
+            elif FIX != "none":
+                workers[i].probe = False
+                workers[i].let_go = True
+                probed = "closed"
+        if units[u].lead and not stopped[units[u].g]:
+            rest = [r for r in range(len(units)) if units[r].g == units[u].g and not units[r].lead]
+            queue = queue + rest
+            pending = pending + len(rest)
+        pending = pending - 1
+        if pending == 0:
+            closed = True
+        workers[i].item = -1
+        workers[i].pc = "idle"
+    elif pc == "close":
+        if workers[i].refetched:
+            whole = True
+        if workers[i].probe:
+            workers[i].probe = False
+            probed = "closed"
+            if not workers[i].cuts:
+                workers[i].let_go = True
+        workers[i].pc = "exit"
+
+# The end of the pass is a state like any other, with a step of its own, so
+# a state that cannot move is one the checker reports.
+atomic action Finished:
+    require all_exit(workers)
+    pass
+
+# R1: never a failure for a blob the view lacked, and a failure of the
+# unit's own is the one handed on.
+always assertion ResultIsTheUnitsOwn:
+    return not missing_handed_on and not own_lost
+
+# R1: once, and a unit is "cut" just when it was handed on.
+always assertion HandedOnOnce:
+    if handed_twice:
+        return False
+    for x in range(len(units)):
+        if units[x].state == "cut" and not handed[x]:
+            return False
+        if handed[x] and units[x].state != "cut":
+            return False
+    return True
+
+# R1, at the end: every unit was cut, skipped, or never queued since its
+# group's lead stopped the group.
+always assertion EveryUnitAccountedFor:
+    if not all_exit(workers):
+        return True
+    for x in units:
+        if x.state == "taken":
+            return False
+        if x.state == "new" and (x.lead or not lead_stopped[x.g]):
+            return False
+    return True
+
+# R2
+always eventually assertion PassEnds:
+    return all_exit(workers)
+
+# R3
+always assertion OneThinViewUntilProven:
+    return proven or thin_made <= 1
+
+# R4
+always assertion ColdProbeSeedsNoOtherThin:
+    return not probe_dirty or thin_made == 1
+
+# R5
+always assertion NoThinCutOnceWholeSeen:
+    return not late_thin_cut
+
+# R6
+always assertion OneDirtyCutAWorker:
+    for w in workers:
+        if w.dirty > 1:
+            return False
+    return True
+
+# R7
+always assertion SkippedOnlyWhenStopped:
+    for x in units:
+        if x.state == "skipped" and not stopped[x.g]:
+            return False
+    return True
+
+# R7
+transition assertion WholeStays(before, after):
+    if before.whole and not after.whole:
+        return False
+    if before.probed == "closed" and after.probed != "closed":
+        return False
+    return True
+
+# coverage: each branch of the protocol is taken somewhere, and each
+# property's "if" comes true somewhere. Each names the state at the moment
+# of the event, or a mark the event alone leaves.
+# these three need a cut that lacks an old blob, so only where one may
+exists assertion ACutIsCutAgain:
+    return "old" not in NEEDS or len([w for w in workers if w.pc == "retry"]) > 0
+
+exists assertion AnOwnFailureIsCutAgain:
+    return len(KINDS) == 1 or len([w for w in workers if w.pc == "retry" and w.own == "bad"]) > 0
+
+exists assertion AMergeMakesViewsWhole:
+    return "old" not in NEEDS or whole and len([w for w in workers if w.refetched and w.pc == "enditem"]) > 0
+
+exists assertion TwoThinViews:
+    return thin_made == 2
+
+exists assertion AColdProbe:
+    return "old" not in NEEDS or probe_dirty
+
+exists assertion ACleanCutInAThinView:
+    return len([w for w in workers if w.pc == "done" and w.view == "thin" and w.outcome == "ok" and not w.pending]) > 0
+
+# the three that need a group stopped, so only where one may be
+exists assertion AUnitIsSkipped:
+    return MAX_STOPS == 0 or len([x for x in units if x.state == "skipped"]) > 0
+
+exists assertion TheProberLetsGoUnproven:
+    return MAX_STOPS == 0 or len([w for w in workers if w.let_go]) > 0
+
+# and this one a unit left to cut in another group
+exists assertion TheProberThatLetGoCutsLater:
+    return MAX_STOPS == 0 or GROUPS[len(GROUPS) - 1] == 0 or len([w for w in workers if w.let_go and w.cuts]) > 0
+
+exists assertion AProberProves:
+    return proven
+
+exists assertion APassEndsWithEveryUnitCut:
+    return all_exit(workers) and len([x for x in units if x.state != "cut"]) == 0
