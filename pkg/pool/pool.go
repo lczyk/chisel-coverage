@@ -44,9 +44,10 @@ type Options struct {
 	// fetches again by its digest, so the cut is the same; the first
 	// blob fetched so has every view made whole, and a cut that fails in
 	// a view not whole is cut again in a whole one, so a failure is never
-	// the view's. The first such view cuts one unit before any other is
-	// made, so a cache that is cold for the run costs one worker's
-	// fetches and not every worker's.
+	// the view's. The first such view cuts one unit before any other
+	// does, so a cache that is cold for the run costs one worker's
+	// fetches and not every worker's. A view kept from an earlier run
+	// has what it had then and what was used within the window since.
 	RecentViews time.Duration
 	// Transport is what the pool's InRelease proxy fetches through, see
 	// inrelease; as http.DefaultTransport when nil.
@@ -110,8 +111,9 @@ type Pool struct {
 	views    []*cache.View // idle views, for the next worker
 	proxy    *inrelease.Proxy
 	whole    bool // views are to hold every blob from now on, see RecentViews
-	// probed is closed once the first view seeded in part has cut a unit
-	// and merged, nil until one is made: the others wait for it.
+	// probed is closed once the first view lacking blobs has cut a unit
+	// and merged, nil until there is one: the others lacking blobs wait
+	// for it before they cut.
 	probed chan struct{}
 	dirs   int // rootfs dirs numbered so far
 	cuts   int // the totals, for the summary line
@@ -278,21 +280,21 @@ lists:
 	return p.ctx.Err()
 }
 
-// Summary removes the idle views and writes the totals so far on the Verbose
+// Summary lets the idle views go and writes the totals so far on the Verbose
 // writer, as "<cuts> cuts <paths> paths <megabytes>mb <seconds>s".
 func (p *Pool) Summary() {
-	p.removeViews()
+	p.releaseViews()
 	p.verbosef("%d cuts %d paths %.1fmb %.1fs", p.cuts, p.paths, float64(p.bytes)/1e6, time.Since(p.start).Seconds())
 }
 
-// Close waits for the rootfs removals and removes the views and, without
-// Options.Keep, the work dir.
+// Close waits for the rootfs removals, lets the views go and, without
+// Options.Keep, removes the work dir.
 func (p *Pool) Close() {
 	if p.proxy != nil {
 		_ = p.proxy.Close()
 	}
 	p.rm.Wait()
-	p.removeViews()
+	p.releaseViews()
 	if !p.opts.Keep {
 		_ = os.RemoveAll(p.work)
 	}
@@ -415,9 +417,12 @@ func (p *Pool) worker(isolate bool) *worker {
 }
 
 // prepare gives an isolated worker its view before its first unit: one an
-// earlier worker left when there is one, else a new one, logged like a cut
-// under the unit's architecture and package. When no view can be made the
-// worker shares chisel's cache as is.
+// earlier worker left when there is one, else one of the cache's, kept from
+// an earlier run or made new, logged like a cut under the unit's
+// architecture and package. A view of the cache's that lacks blobs then
+// probes or waits for the probe, see Pool.probed: only once the view is
+// there can it be seen to lack any, and a kept one may lack none. When no
+// view can be had the worker shares chisel's cache as is.
 func (w *worker) prepare(u Unit) {
 	if !w.isolate {
 		return
@@ -429,9 +434,39 @@ func (w *worker) prepare(u Unit) {
 		w.view, p.views = p.views[n-1], p.views[:n-1]
 	}
 	window := p.opts.RecentViews
+	if p.whole {
+		window = 0
+	}
+	p.mu.Unlock()
+	if w.view != nil {
+		w.enter()
+		return
+	}
+	pkg, _, _ := strings.Cut(u.Slice, "_")
+	// Linking into one directory serialises in the kernel anyway, so
+	// seeding views one at a time costs nothing overall and gets the
+	// first one out sooner.
+	p.seeding.Lock()
+	start := time.Now()
+	view, err := cache.NewRecent(p.opts.Cache, window)
+	p.seeding.Unlock()
+	if err != nil {
+		p.logf("%s %s_%s-cache-view error: %v; sharing chisel's cache instead", u.Arch, pkg, p.opts.Name, err)
+		return
+	}
+	p.mu.Lock()
+	p.seed = time.Since(start)
+	p.mu.Unlock()
+	p.verbosef("%s %s_%s-cache-view %d", u.Arch, pkg, p.opts.Name, view.Blobs())
+	w.view = view
+	w.enter()
+	if !view.Partial() {
+		return
+	}
+	p.mu.Lock()
 	var wait chan struct{}
 	switch {
-	case w.view != nil || window == 0 || p.whole:
+	case p.whole:
 	case p.probed == nil:
 		p.probed = make(chan struct{})
 		w.probe = true
@@ -445,32 +480,18 @@ func (w *worker) prepare(u Unit) {
 		case <-p.ctx.Done():
 		}
 	}
-	p.mu.Lock()
-	if p.whole {
-		window = 0
-	}
-	p.mu.Unlock()
-	if w.view == nil {
-		pkg, _, _ := strings.Cut(u.Slice, "_")
-		// Linking into one directory serialises in the kernel anyway, so
-		// seeding views one at a time costs nothing overall and gets the
-		// first one out sooner.
-		p.seeding.Lock()
-		start := time.Now()
-		view, err := cache.NewRecent(p.opts.Cache, window)
-		p.seeding.Unlock()
-		if err != nil {
-			p.logf("%s %s_%s-cache-view error: %v; sharing chisel's cache instead", u.Arch, pkg, p.opts.Name, err)
-			w.proved()
-			return
-		}
-		p.mu.Lock()
-		p.seed = time.Since(start)
-		p.mu.Unlock()
-		p.verbosef("%s %s_%s-cache-view %d", u.Arch, pkg, p.opts.Name, view.Blobs())
-		w.view = view
-	}
+	// The probe may have said views are to be whole.
+	w.whole(false)
+}
+
+// enter has the worker's chisels run in its view, and hold it: a chisel
+// outliving the run keeps the view from the next one.
+func (w *worker) enter() {
 	w.runner.CacheHome = w.view.Home
+	w.runner.Inherit = nil
+	if lock := w.view.Lock(); lock != nil {
+		w.runner.Inherit = []*os.File{lock}
+	}
 }
 
 // cut cuts one unit into a rootfs dir of its own and logs it.
@@ -582,15 +603,15 @@ func (p *Pool) root(u Unit) string {
 	return filepath.Join(p.work, fmt.Sprintf("%06d", p.dirs))
 }
 
-// removeViews deletes the idle views, all at once since each is thousands of
-// unlinks.
-func (p *Pool) removeViews() {
+// releaseViews lets the idle views go, for the next run to take: all at
+// once, since where views are not kept each is thousands of unlinks.
+func (p *Pool) releaseViews() {
 	var wg sync.WaitGroup
 	for _, v := range p.views {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = v.Remove()
+			_ = v.Release()
 		}()
 	}
 	wg.Wait()

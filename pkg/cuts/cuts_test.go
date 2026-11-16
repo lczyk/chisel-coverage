@@ -17,6 +17,7 @@ import (
 
 	"github.com/lczyk/assert"
 
+	"github.com/lczyk/chisel-coverage/pkg/cache"
 	"github.com/lczyk/chisel-coverage/pkg/cut"
 	"github.com/lczyk/chisel-coverage/pkg/packageslicesfile"
 )
@@ -459,17 +460,18 @@ func TestRunJobsUseCacheViews(t *testing.T) {
 		if h == os.Getenv("XDG_CACHE_HOME") {
 			continue
 		}
-		assert.That(t, strings.HasPrefix(h, base+string(filepath.Separator)+"view-"), h)
+		assert.That(t, strings.HasPrefix(h, base+string(filepath.Separator)+"kept-"), h)
 		inView++
 	}
 	assert.That(t, inView > 0 && inView < len(lines), strconv.Itoa(inView))
-	// Each distinct cut's blob was merged back, and no view is left behind.
+	// Each distinct cut's blob was merged back, and the view is kept for
+	// the next run.
 	blobs, err := os.ReadDir(filepath.Join(shared, "sha256"))
 	assert.NoError(t, err)
 	assert.Len(t, blobs, 1+2*(4+2))
 	views, err := os.ReadDir(base)
 	assert.NoError(t, err)
-	assert.Len(t, views, 0)
+	assert.Len(t, views, 1)
 }
 
 func TestRunArchAllPackagesAreProbed(t *testing.T) {
@@ -527,12 +529,16 @@ func TestRunStopsWhenCancelled(t *testing.T) {
 	_, err := Run(ctx, Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Jobs: 2, Cache: shared, Keep: true, Whole: true, Runner: f.runner, Log: &log}, []string{"bash", "dash"})
 	assert.That(t, errors.Is(err, context.DeadlineExceeded))
 	assert.That(t, time.Since(start) < 4*time.Second)
-	// Nothing after the cuts in flight ran, and the views are gone even
-	// though --keep holds on to the work dir.
+	// Nothing after the cuts in flight ran, and the view is let go, for
+	// the next run to take, whatever --keep holds on to.
 	assert.That(t, len(f.cuts(t)) <= 2)
 	views, err := os.ReadDir(filepath.Join(filepath.Dir(shared), "chisel-coverage"))
 	assert.NoError(t, err)
-	assert.Len(t, views, 0)
+	assert.Len(t, views, 1)
+	v, err := cache.New(shared)
+	assert.NoError(t, err)
+	assert.Equal(t, filepath.Base(v.Home), views[0].Name())
+	assert.NoError(t, v.Remove())
 	assert.That(t, strings.Contains(log.String(), "rootfs dirs: "))
 }
 

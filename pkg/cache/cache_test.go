@@ -2,6 +2,7 @@ package cache
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -143,9 +144,16 @@ func TestRecent(t *testing.T) {
 	for _, name := range []string{"bb", "cc", "dd"} {
 		assert.NoError(t, os.Chtimes(filepath.Join(dir, name), old, old))
 	}
+	// A view of the recent blobs costs less to make, and a kept one to
+	// take less still.
+	recent, whole := CostRecent(shared, time.Hour), Cost(shared)
+	assert.That(t, recent < whole, "cost")
 	v, err := NewRecent(shared, time.Hour)
 	assert.NoError(t, err)
 	defer v.Remove()
+	if keeps {
+		assert.That(t, Cost(shared) < whole, "cost of a kept view")
+	}
 	view := filepath.Join(v.Home, "chisel", "sha256")
 	has := func(name string) bool {
 		_, err := os.Stat(filepath.Join(view, name))
@@ -178,5 +186,161 @@ func TestRecent(t *testing.T) {
 	defer w.Remove()
 	assert.That(t, !w.Partial(), "whole from the start")
 	assert.Equal(t, w.Blobs(), 4)
-	assert.That(t, CostRecent(shared, time.Hour) < Cost(shared), "cost")
+}
+
+func keptViews(t *testing.T, shared string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(filepath.Dir(shared), "chisel-coverage"))
+	assert.NoError(t, err)
+	var out []string
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// A view let go is the next one taken, brought up to date: it gains what
+// the shared cache gained within the window, keeps what it had, and loses
+// what the shared cache lost and what a chisel left half written.
+func TestKeptViewIsTakenAgain(t *testing.T) {
+	if !keeps {
+		t.Skip("views are not kept here")
+	}
+	shared := filepath.Join(t.TempDir(), "chisel")
+	dir := filepath.Join(shared, "sha256")
+	old := time.Now().Add(-48 * time.Hour)
+	for _, name := range []string{"aa", "bb", "a0"} {
+		write(t, filepath.Join(dir, name), name)
+	}
+	assert.NoError(t, os.Chtimes(filepath.Join(dir, "a0"), old, old))
+	v, err := NewRecent(shared, time.Hour)
+	assert.NoError(t, err)
+	home := v.Home
+	view := filepath.Join(home, "chisel", "sha256")
+	assert.Equal(t, v.Blobs(), 2)
+	assert.That(t, v.Partial())
+	// A blob fetched and never merged, and a fetch cut short.
+	write(t, filepath.Join(view, "f1"), "x")
+	write(t, filepath.Join(view, "f2.tmp"), "half")
+	assert.NoError(t, v.Release())
+	assert.Nil(t, v.Lock())
+	assert.Len(t, keptViews(t, shared), 1)
+
+	// Meanwhile the shared cache gains two blobs, one of them old, and
+	// loses one.
+	write(t, filepath.Join(dir, "cc"), "cc")
+	write(t, filepath.Join(dir, "b0"), "b0")
+	assert.NoError(t, os.Chtimes(filepath.Join(dir, "b0"), old, old))
+	assert.NoError(t, os.Remove(filepath.Join(dir, "bb")))
+	// The view goes stale-looking but for the touch of its release.
+	v, err = NewRecent(shared, time.Hour)
+	assert.NoError(t, err)
+	assert.Equal(t, v.Home, home)
+	has := func(name string) bool {
+		_, err := os.Stat(filepath.Join(view, name))
+		return err == nil
+	}
+	assert.That(t, has("aa") && has("cc"))
+	assert.That(t, !has("bb") && !has("f1") && !has("f2.tmp") && !has("a0") && !has("b0"))
+	assert.That(t, sameFile(t, filepath.Join(dir, "cc"), filepath.Join(view, "cc")))
+	assert.Equal(t, v.Blobs(), 2)
+	assert.That(t, v.Partial())
+	assert.NoError(t, v.Complete())
+	assert.That(t, has("a0") && has("b0") && !v.Partial())
+	assert.NoError(t, v.Release())
+
+	// Made whole, it is whole when taken again, and only gains.
+	write(t, filepath.Join(dir, "dd"), "dd")
+	v, err = NewRecent(shared, time.Hour)
+	assert.NoError(t, err)
+	assert.Equal(t, v.Home, home)
+	assert.That(t, !v.Partial() && has("dd") && has("a0"))
+	assert.Equal(t, v.Blobs(), 5)
+	assert.NoError(t, v.Remove())
+	assert.Len(t, keptViews(t, shared), 0)
+}
+
+// A view a run has is no other run's, nor a sweep's, however stale; one let
+// go and stale is swept.
+func TestKeptViewIsOneRunsAtATime(t *testing.T) {
+	if !keeps {
+		t.Skip("views are not kept here")
+	}
+	shared := filepath.Join(t.TempDir(), "chisel")
+	write(t, filepath.Join(shared, "sha256", "aa"), "a")
+	a, err := New(shared)
+	assert.NoError(t, err)
+	b, err := New(shared)
+	assert.NoError(t, err)
+	assert.That(t, a.Home != b.Home)
+	assert.Len(t, keptViews(t, shared), 2)
+
+	old := time.Now().Add(-48 * time.Hour)
+	assert.NoError(t, os.Chtimes(a.Home, old, old))
+	assert.NoError(t, os.Chtimes(b.Home, old, old))
+	sweep(filepath.Dir(a.Home))
+	assert.Len(t, keptViews(t, shared), 2)
+
+	// b is let go and goes stale; a is still taken.
+	assert.NoError(t, b.Release())
+	assert.NoError(t, os.Chtimes(b.Home, old, old))
+	assert.NoError(t, os.Chtimes(a.Home, old, old))
+	sweep(filepath.Dir(a.Home))
+	left := keptViews(t, shared)
+	assert.Len(t, left, 1)
+	assert.Equal(t, left[0], filepath.Base(a.Home))
+	_, err = os.Stat(filepath.Join(a.Home, "chisel", "sha256", "aa"))
+	assert.NoError(t, err)
+	assert.NoError(t, a.Remove())
+}
+
+// A lock got on a view swept since its lock file was opened is no lock on
+// a view (kept.fizz, the design "noverify").
+func TestLockOnASweptViewIsNoLock(t *testing.T) {
+	if !keeps {
+		t.Skip("views are not kept here")
+	}
+	base := t.TempDir()
+	home := filepath.Join(base, "kept-x")
+	write(t, filepath.Join(home, lockName), "")
+	lock := lockKept(home)
+	assert.That(t, lock != nil)
+	// Swept by its holder: renamed away, and a view of the same name made.
+	assert.NoError(t, os.Rename(home, filepath.Join(base, "trash-x")))
+	assert.NoError(t, lock.Close())
+	assert.Nil(t, lockKept(home))
+	write(t, filepath.Join(home, lockName), "")
+	stale, err := os.OpenFile(filepath.Join(base, "trash-x", lockName), os.O_RDWR, 0)
+	assert.NoError(t, err)
+	defer stale.Close()
+	assert.That(t, tryLock(stale), "the old file locks, and is not the view's")
+	again := lockKept(home)
+	assert.That(t, again != nil, "the new view's own lock is free")
+	assert.NoError(t, again.Close())
+}
+
+// A process that inherited the lock holds the view after the run let it go:
+// the chisel a dead run left behind.
+func TestInheritedLockHoldsTheView(t *testing.T) {
+	if !keeps {
+		t.Skip("views are not kept here")
+	}
+	shared := filepath.Join(t.TempDir(), "chisel")
+	v, err := New(shared)
+	assert.NoError(t, err)
+	home := v.Home
+	cmd := exec.Command("sleep", "30")
+	cmd.ExtraFiles = []*os.File{v.Lock()}
+	assert.NoError(t, cmd.Start())
+	assert.NoError(t, v.Release())
+	other, err := New(shared)
+	assert.NoError(t, err)
+	assert.That(t, other.Home != home, "taken while the child lives")
+	assert.NoError(t, other.Remove())
+	assert.NoError(t, cmd.Process.Kill())
+	_ = cmd.Wait()
+	again, err := New(shared)
+	assert.NoError(t, err)
+	assert.Equal(t, again.Home, home)
+	assert.NoError(t, again.Remove())
 }

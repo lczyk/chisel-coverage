@@ -12,6 +12,13 @@
 // whatever the run needs of it. A blob such a view lacks is one chisel
 // fetches again, by its digest, so the cut is the same; the view tells of
 // it, and Complete links the rest.
+//
+// A view is kept when its run lets it go, see Release, and the next run
+// takes it and links in only what the shared cache gained since: seeding a
+// view is the cost of a few cuts, bringing one up to date next to nothing.
+// A lock on a file of the view says it is taken, held for as long as a run,
+// or a chisel it left behind, works in it. How runs come by kept views and
+// sweep the ones no run wants is modelled in kept.fizz.
 package cache
 
 import (
@@ -21,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -51,6 +59,7 @@ type View struct {
 	// <kind>/<name>; refetched how many of them chisel fetched again.
 	rest      map[string]bool
 	refetched int
+	lock      *os.File // held while the view is taken; nil where views are not kept
 }
 
 // Linking tens of thousands of blobs is syscall-bound; a few goroutines
@@ -61,14 +70,29 @@ const linkers = 4
 // a temp file or a lock.
 var blob = regexp.MustCompile(`^[0-9a-f]+$`)
 
-// New makes a view under <parent of shared>/chisel-coverage, so on the
-// same filesystem, seeded with every blob of shared. Views a crashed run left
-// behind for more than a day are removed on the way.
+// The names of the dirs under <parent of shared>/chisel-coverage: a kept
+// view, one being made, and one being removed. A view-* dir is a view of a
+// release that kept none, swept as that release swept them.
+const (
+	keptPrefix  = "kept-"
+	newPrefix   = "new-"
+	trashPrefix = "trash-"
+	lockName    = "lock"
+)
+
+// A kept view no run has taken for this long is removed by the next run.
+const keepFor = 24 * time.Hour
+
+// New gives a view under <parent of shared>/chisel-coverage, so on the
+// same filesystem, with every blob of shared: a kept one no run has, brought
+// up to date, else one made new. Views no run has taken for a day are
+// removed on the way.
 func New(shared string) (*View, error) { return NewRecent(shared, 0) }
 
-// NewRecent is New, seeded only with the blobs of shared used within the
-// window: chisel touches a blob whenever it takes it from its cache. A
-// window of zero seeds every blob.
+// NewRecent is New, but a view made new is seeded only with the blobs of
+// shared used within the window, and a kept one gains only those: chisel
+// touches a blob whenever it takes it from its cache. A window of zero is
+// every blob.
 func NewRecent(shared string, window time.Duration) (*View, error) {
 	base := filepath.Join(filepath.Dir(shared), "chisel-coverage")
 	// Next to shared, not to Dir(): shared may be a test's own dir rather
@@ -77,31 +101,120 @@ func NewRecent(shared string, window time.Duration) (*View, error) {
 		return nil, err
 	}
 	sweep(base)
-	home, err := os.MkdirTemp(base, "view-*")
+	home, lock, err := take(base)
 	if err != nil {
 		return nil, err
 	}
-	v := &View{Home: home, shared: shared, dir: filepath.Join(home, "chisel"), known: map[string]bool{}, rest: map[string]bool{}}
+	v := &View{Home: home, shared: shared, dir: filepath.Join(home, "chisel"), known: map[string]bool{}, rest: map[string]bool{}, lock: lock}
 	if err := v.seed(window); err != nil {
-		_ = os.RemoveAll(home)
+		_ = v.Remove()
 		return nil, err
 	}
 	return v, nil
 }
 
-// seed hard-links every blob of the shared cache into the view, or with a
-// window those used within it. On another filesystem the first link fails
-// and the view starts empty.
+// take is the home of a view no other run has, and the lock that says so:
+// a kept one, else one made new. Where views are not kept the lock is nil.
+func take(base string) (home string, lock *os.File, err error) {
+	if !keeps {
+		home, err = os.MkdirTemp(base, "view-*")
+		return home, nil, err
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), keptPrefix) {
+			continue
+		}
+		home := filepath.Join(base, e.Name())
+		if lock := lockKept(home); lock != nil {
+			now := time.Now()
+			_ = os.Chtimes(home, now, now)
+			return home, lock, nil
+		}
+	}
+	// Made under a name no run lists, locked there, then renamed: a kept
+	// view is never seen without its lock held or free to take.
+	tmp, err := os.MkdirTemp(base, newPrefix+"*")
+	if err != nil {
+		return "", nil, err
+	}
+	lock, err = os.OpenFile(filepath.Join(tmp, lockName), os.O_RDWR|os.O_CREATE, 0644)
+	if err == nil {
+		if !tryLock(lock) {
+			err = errors.New("cannot lock a new cache view")
+		}
+	}
+	home = filepath.Join(base, keptPrefix+strings.TrimPrefix(filepath.Base(tmp), newPrefix))
+	if err == nil {
+		err = os.Rename(tmp, home)
+	}
+	if err != nil {
+		if lock != nil {
+			_ = lock.Close()
+		}
+		_ = os.RemoveAll(tmp)
+		return "", nil, err
+	}
+	return home, lock, nil
+}
+
+// lockKept takes the lock of the kept view at home, nil when another run
+// has it or the view is gone. The lock is got on the file as it was when
+// opened, and the view may have been swept between the two: only a lock on
+// the file still at its place is a lock on the view.
+func lockKept(home string) *os.File {
+	p := filepath.Join(home, lockName)
+	lock, err := os.OpenFile(p, os.O_RDWR, 0)
+	if err != nil {
+		return nil
+	}
+	if tryLock(lock) {
+		held, err1 := lock.Stat()
+		there, err2 := os.Stat(p)
+		if err1 == nil && err2 == nil && os.SameFile(held, there) {
+			return lock
+		}
+	}
+	_ = lock.Close()
+	return nil
+}
+
+// seed brings the view up to date with the shared cache: every blob of it
+// hard-linked in, or with a window those used within it, on top of what a
+// kept view has. What the view has and the shared cache does not goes: the
+// shared cache is what holds, and a blob taken out of it is not put back
+// by a view. On another filesystem the first link fails and a view made
+// new starts empty.
 func (v *View) seed(window time.Duration) error {
+	has := map[string]bool{}
+	err := eachFile(v.dir, func(kind, name string) error {
+		if blob.MatchString(name) {
+			has[filepath.Join(kind, name)] = true
+			return nil
+		}
+		// What a chisel that died left half written.
+		return os.Remove(filepath.Join(v.dir, kind, name))
+	})
+	if err != nil {
+		return err
+	}
 	var names []string
 	kinds := map[string]bool{}
 	since := time.Now().Add(-window)
-	err := eachBlob(v.shared, func(kind, name string) error {
+	err = eachBlob(v.shared, func(kind, name string) error {
 		if !kinds[kind] {
 			kinds[kind] = true
 			if err := os.MkdirAll(filepath.Join(v.dir, kind), 0755); err != nil {
 				return err
 			}
+		}
+		if has[filepath.Join(kind, name)] {
+			delete(has, filepath.Join(kind, name))
+			v.known[filepath.Join(kind, name)] = true
+			return nil
 		}
 		if window > 0 {
 			// A blob gone since it was listed is one to do without.
@@ -116,6 +229,11 @@ func (v *View) seed(window time.Duration) error {
 	})
 	if err != nil {
 		return err
+	}
+	for name := range has {
+		if err := os.Remove(filepath.Join(v.dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
 	return v.link(names)
 }
@@ -231,19 +349,26 @@ func (v *View) Merge() error {
 	})
 }
 
-// A hard link costs about this long on apfs and ext4, and a view is linked
-// once and removed once, which is what Cost adds up.
-const perBlob = 400 * time.Microsecond
+// A hard link costs about this long on apfs and ext4, which is what a view
+// made new costs a blob. A kept view is listed and compared, far less a
+// blob, and gains the few the shared cache did.
+const (
+	perBlob     = 400 * time.Microsecond
+	perKeptBlob = 10 * time.Microsecond
+)
 
-// Cost estimates how long New and Remove take for a view of shared, so a
-// caller can tell whether a worker has enough work to be worth one.
+// Cost estimates how long New takes for a view of shared, so a caller can
+// tell whether a worker has enough work to be worth one.
 func Cost(shared string) time.Duration { return CostRecent(shared, 0) }
 
-// CostRecent is Cost for a view NewRecent makes with the window.
+// CostRecent is Cost for a view NewRecent gives with the window. With a
+// kept view to be had it is the cost of taking one, though the views kept
+// may be fewer than the caller comes to ask for.
 func CostRecent(shared string, window time.Duration) time.Duration {
-	n := 0
+	n, all := 0, 0
 	since := time.Now().Add(-window)
 	_ = eachBlob(shared, func(kind, name string) error {
+		all++
 		if window > 0 {
 			if info, err := os.Lstat(filepath.Join(shared, kind, name)); err != nil || info.ModTime().Before(since) {
 				return nil
@@ -252,17 +377,68 @@ func CostRecent(shared string, window time.Duration) time.Duration {
 		n++
 		return nil
 	})
+	if kept(filepath.Join(filepath.Dir(shared), "chisel-coverage")) {
+		return max(time.Millisecond, time.Duration(all)*perKeptBlob)
+	}
 	return max(time.Millisecond, time.Duration(n)*perBlob)
+}
+
+// kept reports whether base holds a kept view, taken or not.
+func kept(base string) bool {
+	entries, _ := os.ReadDir(base)
+	for _, e := range entries {
+		if keeps && e.IsDir() && strings.HasPrefix(e.Name(), keptPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Remove deletes the view. Blobs not merged are lost.
 func (v *View) Remove() error {
-	return os.RemoveAll(v.Home)
+	err := os.RemoveAll(v.Home)
+	v.unlock()
+	return err
+}
+
+// Release lets the view go for another run to take, as it is: blobs not
+// merged are lost to the shared cache until a run fetches them again. Not
+// while a chisel runs in the view. Where views are not kept it is Remove.
+func (v *View) Release() error {
+	if v.lock == nil {
+		return v.Remove()
+	}
+	now := time.Now()
+	_ = os.Chtimes(v.Home, now, now)
+	v.unlock()
+	return nil
+}
+
+// Lock is the open file whose lock says the view is taken, nil where views
+// are not kept. A chisel given it to inherit holds the view for as long as
+// it runs, should the run that started it die first.
+func (v *View) Lock() *os.File { return v.lock }
+
+func (v *View) unlock() {
+	if v.lock != nil {
+		_ = v.lock.Close()
+		v.lock = nil
+	}
 }
 
 // eachBlob calls fn for every blob under root, as <digest kind dir>/<name>.
 // A missing root is an empty cache.
 func eachBlob(root string, fn func(kind, name string) error) error {
+	return eachFile(root, func(kind, name string) error {
+		if !blob.MatchString(name) {
+			return nil
+		}
+		return fn(kind, name)
+	})
+}
+
+// eachFile calls fn for every regular file of a digest kind dir under root.
+func eachFile(root string, fn func(kind, name string) error) error {
 	kinds, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -279,7 +455,7 @@ func eachBlob(root string, fn func(kind, name string) error) error {
 			return err
 		}
 		for _, e := range entries {
-			if !e.Type().IsRegular() || !blob.MatchString(e.Name()) {
+			if !e.Type().IsRegular() {
 				continue
 			}
 			if err := fn(k.Name(), e.Name()); err != nil {
@@ -314,20 +490,39 @@ func copyFile(src, dst string) error {
 	return os.Rename(tmp.Name(), dst)
 }
 
-// sweep removes views under base that nothing has touched for a day.
+// sweep removes the views under base that no run has taken for a day, and
+// what a run that died left of making or removing one.
 func sweep(base string) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return
 	}
-	stale := time.Now().Add(-24 * time.Hour)
+	stale := func(p string) bool {
+		info, err := os.Lstat(p)
+		return err == nil && info.ModTime().Before(time.Now().Add(-keepFor))
+	}
 	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil || !e.IsDir() || !info.ModTime().Before(stale) {
+		p := filepath.Join(base, e.Name())
+		if !e.IsDir() || !stale(p) {
 			continue
 		}
-		if ok, _ := filepath.Match("view-*", e.Name()); ok {
-			_ = os.RemoveAll(filepath.Join(base, e.Name()))
+		switch {
+		case strings.HasPrefix(e.Name(), "view-"), strings.HasPrefix(e.Name(), newPrefix), strings.HasPrefix(e.Name(), trashPrefix):
+			_ = os.RemoveAll(p)
+		case strings.HasPrefix(e.Name(), keptPrefix):
+			// Only with its lock held, so no run has it, and still
+			// stale then, so none took and let go of it meanwhile. It
+			// leaves its name in one step: a run that opened its lock
+			// before then finds the file no longer at its place.
+			lock := lockKept(p)
+			if lock == nil {
+				continue
+			}
+			trash := filepath.Join(base, trashPrefix+strings.TrimPrefix(e.Name(), keptPrefix))
+			if stale(p) && os.Rename(p, trash) == nil {
+				_ = os.RemoveAll(trash)
+			}
+			_ = lock.Close()
 		}
 	}
 }

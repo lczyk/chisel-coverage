@@ -246,18 +246,24 @@ func TestPassUsesCacheViews(t *testing.T) {
 		if h == os.Getenv("XDG_CACHE_HOME") {
 			continue
 		}
-		assert.That(t, strings.HasPrefix(h, base+string(filepath.Separator)+"view-"), h)
+		assert.That(t, strings.HasPrefix(h, base+string(filepath.Separator)+"kept-"), h)
 		inView++
 	}
 	assert.That(t, inView > 0 && inView < len(lines), lines)
 	assert.That(t, regexp.MustCompile(`amd64 (bash|dash)_diff-cache-view \d+\n`).MatchString(out.String()), out.String())
-	// Each cut's blob was merged back, and no view is left behind.
+	// Each cut's blob was merged back, and the view is kept, free for the
+	// next run to take.
 	blobs, err := os.ReadDir(filepath.Join(shared, "sha256"))
 	assert.NoError(t, err)
 	assert.Len(t, blobs, 1+6)
 	views, err := os.ReadDir(base)
 	assert.NoError(t, err)
-	assert.Len(t, views, 0)
+	assert.Len(t, views, 1)
+	v, err := cache.New(shared)
+	assert.NoError(t, err)
+	assert.Equal(t, v.Home, filepath.Join(base, views[0].Name()))
+	assert.Equal(t, v.Blobs(), 1+6)
+	assert.NoError(t, v.Remove())
 }
 
 func TestSerialCutsEachListInOrderWithoutViews(t *testing.T) {
@@ -500,8 +506,8 @@ func TestRecentViews(t *testing.T) {
 }
 
 // The first view seeded in part cuts a unit alone: when that shows the
-// cache cold, the workers after it start with whole views and nothing is
-// cut twice but the one unit that found out.
+// cache cold, the workers waiting for it have their views made whole before
+// they cut and nothing is cut twice but the one unit that found out.
 func TestRecentViewsProbe(t *testing.T) {
 	f := setup(t)
 	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
@@ -527,10 +533,10 @@ func TestRecentViewsProbe(t *testing.T) {
 	p.Close()
 	assert.Equal(t, log.String(), "")
 	assert.Equal(t, strings.Count(out.String(), "again, in a whole cache view"), 1, out.String())
-	// One view seeded with nothing, the probe's, and the others whole.
-	thin := regexp.MustCompile(`-cache-view 0\n`).FindAllString(out.String(), -1)
-	assert.Len(t, thin, 1)
-	assert.That(t, len(regexp.MustCompile(`-cache-view \d+\n`).FindAllString(out.String(), -1)) > 1, out.String())
+	// Every view is seeded with nothing, and only the probe's cuts so.
+	views := regexp.MustCompile(`-cache-view \d+\n`).FindAllString(out.String(), -1)
+	assert.That(t, len(views) > 1, out.String())
+	assert.Len(t, regexp.MustCompile(`-cache-view 0\n`).FindAllString(out.String(), -1), len(views))
 	assert.Len(t, f.cuts(t), 16+1)
 }
 
@@ -580,6 +586,39 @@ func TestProbeThatCutsNothingLetsGo(t *testing.T) {
 	assert.That(t, p.whole, "views are to be whole")
 	assert.That(t, !w.probe, "the probe is over")
 	assert.That(t, w2.view != nil && !w2.view.Partial(), "the worker let go has a whole view")
+	w.close()
+	w2.close()
+}
+
+// A view kept from an earlier run may lack nothing, and a view lacking
+// nothing proves nothing of the ones that do: it neither probes nor waits,
+// and the first view that does lack blobs is the probe (views.fizz, D3).
+func TestKeptViewLackingNothingDoesNotProbe(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "chisel")
+	assert.NoError(t, os.MkdirAll(filepath.Join(shared, "sha256"), 0755))
+	blob := filepath.Join(shared, "sha256", "abc123")
+	assert.NoError(t, os.WriteFile(blob, []byte("x"), 0644))
+	old := time.Now().Add(-240 * time.Hour)
+	assert.NoError(t, os.Chtimes(blob, old, old))
+	// An earlier run's view, made whole there.
+	kept, err := cache.New(shared)
+	assert.NoError(t, err)
+	home := kept.Home
+	assert.NoError(t, kept.Release())
+
+	p, err := New(context.Background(), Options{Runner: &cut.Runner{Bin: "true"}, Jobs: 3, Cache: shared})
+	assert.NoError(t, err)
+	defer p.Close()
+	w := p.worker(true)
+	w.prepare(Unit{Arch: "amd64", Slice: "bash_a"})
+	assert.Equal(t, w.view.Home, home)
+	assert.That(t, !w.view.Partial() && !w.probe && p.probed == nil, "a view lacking nothing does not probe")
+	// Its chisels hold the view for as long as they run.
+	assert.Len(t, w.runner.Inherit, 1)
+	w2 := p.worker(true)
+	w2.prepare(Unit{Arch: "amd64", Slice: "bash_b"})
+	assert.That(t, w2.view.Home != home, "a view taken is not taken twice")
+	assert.That(t, w2.view.Partial() && w2.probe, "the first view lacking blobs probes")
 	w.close()
 	w2.close()
 }

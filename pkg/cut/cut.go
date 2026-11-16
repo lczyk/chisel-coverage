@@ -39,6 +39,10 @@ type Runner struct {
 	CacheHome string
 	// HTTPProxy, when set, is the http_proxy chisel runs with.
 	HTTPProxy string
+	// Inherit are open files chisel is started with and never touches: a
+	// lock held on one is held for as long as chisel runs, even past the
+	// death of this process.
+	Inherit []*os.File
 }
 
 // Deb is a package a cut fetched, read from chisel's Fetching line.
@@ -219,6 +223,7 @@ func (r *Runner) command(ctx context.Context, args []string, prefix string) (*ex
 	cmd := exec.CommandContext(ctx, r.Bin, args...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 5 * time.Second
+	cmd.ExtraFiles = r.Inherit
 	if r.CacheHome != "" || r.HTTPProxy != "" {
 		cmd.Env = os.Environ()
 	}

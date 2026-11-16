@@ -233,3 +233,23 @@ func TestSkippedIsSorted(t *testing.T) {
 	out := "Archive \"ubuntu-esm-infra\" ignored: credentials not found\nArchive \"ubuntu-esm-apps\" ignored: credentials not found\nArchive \"ubuntu-esm-infra\" ignored: credentials not found\n"
 	assert.EqualArrays(t, skipped(out), []string{"ubuntu-esm-apps", "ubuntu-esm-infra"})
 }
+
+// chisel is started with the files it is to inherit, after its own three.
+func TestCutInherits(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "chisel")
+	script := "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --root ] && root=$2; shift; done\ncat <&3 > \"$root/inherited\"\n"
+	assert.NoError(t, os.WriteFile(bin, []byte(script), 0755))
+	held := filepath.Join(dir, "held")
+	assert.NoError(t, os.WriteFile(held, []byte("held"), 0644))
+	f, err := os.Open(held)
+	assert.NoError(t, err)
+	defer f.Close()
+	r := &Runner{Bin: bin, Inherit: []*os.File{f}}
+	root := filepath.Join(dir, "root")
+	_, err = r.Cut(context.Background(), "rel", root, "amd64", "demo_a")
+	assert.NoError(t, err)
+	b, err := os.ReadFile(filepath.Join(root, "inherited"))
+	assert.NoError(t, err)
+	assert.Equal(t, string(b), "held")
+}

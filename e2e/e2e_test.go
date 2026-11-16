@@ -242,7 +242,11 @@ func TestThinViews(t *testing.T) {
 		t.Errorf("offline: no cut was cut again:\n%s", out.String())
 	}
 
-	// The network up: what a view lacks is fetched again.
+	// The network up: what a view lacks is fetched again. The views the
+	// pool kept are whole by now, so they go: the next ones are made new.
+	if err := os.RemoveAll(filepath.Join(filepath.Dir(shared), "chisel-coverage")); err != nil {
+		t.Fatal(err)
+	}
 	age()
 	net.down.Store(false)
 	out.Reset()
