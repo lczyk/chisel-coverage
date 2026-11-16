@@ -43,7 +43,7 @@ total 3 covered 3 ignored 0 uncovered 0
 
 every entry of the deb counts, directories included. a directory is covered once anything under it is. `--arch all` checks every architecture, and architectures with the same version are folded on what their debs ship. `<arch>` and `<gnu>` in paths are normalised and paths are grouped across arches. `--no-group` ungroups. `--json` never groups. 
 
-several packages can be given at once, and all cuts run in parallel. jobs get work at slice-level granularity. one job per cpu by default (`--jobs=-1`) and each job is set up with a private view of the cache so concurrent cuts dont clobber one-anothe's caches. `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`. a package can also be given as the path of its file (`slices/bash.yaml`), so tab completion works.
+several packages can be given at once, and all cuts run in parallel. jobs get work at slice-level granularity. one job per cpu by default (`--jobs=-1`) and each job is set up with a private view of the cache so concurrent cuts dont clobber one-anothe's caches. `chisel` binary is found on `PATH`, or set `CHISEL=/path/to/chisel`. a run fetches each suite's `InRelease` once and not once per cut, and a job's view of the cache starts with what was used in the last three days. a package can also be given as the path of its file (`slices/bash.yaml`), so tab completion works.
 
 you can add paths to `--ignore`. the syntax is identical to chisel's package slices files since that's what ignore is doing under the hood. in fact, this entire tool is written using pattented (not really) [`chisel-proxy`](https://github.com/lczyk/chisel-proxy) technology. `--ignore` only ever shrinks the uncovered set so a covered path that matches an ignore stays covered.
 
@@ -59,7 +59,7 @@ the building blocks are importable as `github.com/lczyk/chisel-coverage/pkg`, a 
 
 - `pkg/cuts` -- cut every slice of every package on every architecture, scheduled so concurrent chisels never share a writable cache, and get each rootfs listing back.
 - `pkg/pool` -- the worker pool under it, for cuts of any release dir: hand it units, get each finished cut back while its rootfs still exists.
-- `pkg/packageslicesfile`, `pkg/cut`, `pkg/cache`, `pkg/release` -- the other pieces it is made of: package slices files stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, `--release` resolution.
+- `pkg/packageslicesfile`, `pkg/cut`, `pkg/cache`, `pkg/inrelease`, `pkg/release` -- the other pieces it is made of: package slices files stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, a suite's `InRelease` fetched once a run, `--release` resolution.
 - `pkg/fold` -- normalise what names the architecture in a path, and fold architectures on what they share.
 
 ```shell

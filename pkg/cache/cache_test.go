@@ -129,3 +129,54 @@ func TestCopyMerge(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, entries, 1)
 }
+
+// A view seeded with the recent blobs alone lacks the old ones, counts the
+// ones chisel fetches again, and is made whole by Complete.
+func TestRecent(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "chisel")
+	dir := filepath.Join(shared, "sha256")
+	assert.NoError(t, os.MkdirAll(dir, 0755))
+	old := time.Now().Add(-48 * time.Hour)
+	for _, name := range []string{"aa", "bb", "cc", "dd"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(name), 0644))
+	}
+	for _, name := range []string{"bb", "cc", "dd"} {
+		assert.NoError(t, os.Chtimes(filepath.Join(dir, name), old, old))
+	}
+	v, err := NewRecent(shared, time.Hour)
+	assert.NoError(t, err)
+	defer v.Remove()
+	view := filepath.Join(v.Home, "chisel", "sha256")
+	has := func(name string) bool {
+		_, err := os.Stat(filepath.Join(view, name))
+		return err == nil
+	}
+	assert.That(t, has("aa") && !has("bb") && !has("cc") && !has("dd"), "seeded")
+	assert.That(t, v.Partial(), "partial")
+	assert.Equal(t, v.Blobs(), 1)
+
+	// chisel fetches one the shared cache has, and one it does not.
+	assert.NoError(t, os.WriteFile(filepath.Join(view, "bb"), []byte("bb"), 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(view, "ee"), []byte("ee"), 0644))
+	assert.NoError(t, v.Merge())
+	assert.Equal(t, v.Refetched(), 1)
+	b, err := os.ReadFile(filepath.Join(dir, "ee"))
+	assert.NoError(t, err)
+	assert.Equal(t, string(b), "ee")
+
+	// One expired from the shared cache meanwhile is done without.
+	assert.NoError(t, os.Remove(filepath.Join(dir, "dd")))
+	assert.NoError(t, v.Complete())
+	assert.That(t, has("aa") && has("bb") && has("cc") && has("ee") && !has("dd"), "whole")
+	assert.That(t, !v.Partial(), "whole")
+	assert.NoError(t, v.Merge())
+	assert.Equal(t, v.Refetched(), 1)
+
+	// A window of zero is every blob, as New.
+	w, err := NewRecent(shared, 0)
+	assert.NoError(t, err)
+	defer w.Remove()
+	assert.That(t, !w.Partial(), "whole from the start")
+	assert.Equal(t, w.Blobs(), 4)
+	assert.That(t, CostRecent(shared, time.Hour) < Cost(shared), "cost")
+}

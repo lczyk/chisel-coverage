@@ -27,9 +27,11 @@ import (
 // chisel's cache: it fails unless blob $FAKE_CACHE is in
 // $XDG_CACHE_HOME/chisel/sha256/, then writes a blob named after the cut
 // there and appends "<home> <arch> <slice>" to $FAKE_HOMES. With $FAKE_ARGS
-// set it appends its arguments there, a cut a line.
+// set it appends its arguments there, a cut a line, and with $FAKE_PROXY set
+// the http_proxy and HTTP_PROXY it ran with.
 const fakeChisel = `#!/bin/sh
 [ -n "$FAKE_ARGS" ] && printf '%s\n' "$*" >> "$FAKE_ARGS"
+[ -n "$FAKE_PROXY" ] && printf '%s %s\n' "$http_proxy" "$HTTP_PROXY" >> "$FAKE_PROXY"
 slice=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,6 +80,7 @@ func setup(t *testing.T) *fixture {
 	t.Setenv("FAKE_FAIL", "")
 	t.Setenv("FAKE_NA", "")
 	t.Setenv("FAKE_CACHE", "")
+	t.Setenv("FAKE_PROXY", "")
 	t.Setenv("FAKE_HOMES", filepath.Join(tmp, "homes"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "xdg"))
 	return f
@@ -413,4 +416,170 @@ func TestResolveArches(t *testing.T) {
 
 	_, err = ResolveArches([]string{"vax"})
 	assert.Error(t, err, `invalid architecture "vax"`)
+}
+
+// Every cut of a run is pointed at the pool's one proxy, over a proxy
+// setting of the user's own.
+func TestInReleaseProxy(t *testing.T) {
+	f := setup(t)
+	seen := filepath.Join(t.TempDir(), "proxy")
+	t.Setenv("FAKE_PROXY", seen)
+	t.Setenv("http_proxy", "http://user.example:3128")
+	p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2})
+	assert.NoError(t, err)
+	err = p.Pass([]Group{group("rel", "amd64", "bash_a", "bash_b"), group("rel", "arm64", "bash_a")}, func(c Cut) bool {
+		assert.NoError(t, c.Err)
+		return true
+	})
+	assert.NoError(t, err)
+	p.Close()
+	b, err := os.ReadFile(seen)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	assert.Len(t, lines, 3)
+	for _, l := range lines {
+		assert.Equal(t, l, lines[0])
+		assert.That(t, regexp.MustCompile(`^(http://127\.0\.0\.1:\d+) (http://127\.0\.0\.1:\d+)$`).MatchString(l), l)
+		assert.Equal(t, strings.Fields(l)[0], strings.Fields(l)[1])
+	}
+	// The caller's runner is not the pool's to change.
+	assert.Equal(t, f.runner.HTTPProxy, "")
+}
+
+// A view starts without the blobs not used of late. A cut that fails for the
+// lack of one is cut again in a whole view, so the run ends as it would have
+// with whole views, which a negative RecentViews asks for.
+func TestRecentViews(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		old, plain    bool
+		again, blobs1 bool
+	}{
+		{name: "needs an old blob", old: true, again: true},
+		{name: "needs a recent blob", blobs1: true},
+		{name: "whole views", old: true, plain: true},
+	} {
+		f := setup(t)
+		shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+		dir := filepath.Join(shared, "sha256")
+		assert.NoError(t, os.MkdirAll(dir, 0755))
+		// The blob every cut of the fake needs, and one no cut does.
+		assert.NoError(t, os.WriteFile(filepath.Join(dir, "abc123"), []byte("x"), 0644))
+		assert.NoError(t, os.WriteFile(filepath.Join(dir, "def456"), []byte("y"), 0644))
+		old := time.Now().Add(-48 * time.Hour)
+		assert.NoError(t, os.Chtimes(filepath.Join(dir, "def456"), old, old))
+		if c.old {
+			assert.NoError(t, os.Chtimes(filepath.Join(dir, "abc123"), old, old))
+		}
+		t.Setenv("FAKE_CACHE", "abc123")
+		window := time.Hour
+		if c.plain {
+			window = -1
+		}
+		var log, out strings.Builder
+		p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 2, Cache: shared, Name: "t", RecentViews: window, Log: &log, Verbose: &out})
+		assert.NoError(t, err)
+		err = p.Pass([]Group{
+			group("rel", "amd64", "bash_a", "bash_b", "bash_c"),
+			group("rel", "amd64", "dash_a", "dash_b", "dash_c"),
+		}, func(cut Cut) bool {
+			assert.NoError(t, cut.Err, c.name)
+			return true
+		})
+		assert.NoError(t, err)
+		p.Close()
+		assert.Equal(t, log.String(), "", c.name)
+		assert.Equal(t, strings.Contains(out.String(), "again, in a whole cache view"), c.again, c.name, out.String())
+		// A thin view of the one recent blob, else every blob.
+		assert.Equal(t, regexp.MustCompile(`-cache-view 1\n`).MatchString(out.String()), c.blobs1, c.name, out.String())
+		// Every cut's blob was merged back, whichever way it was cut.
+		blobs, err := os.ReadDir(dir)
+		assert.NoError(t, err)
+		assert.Len(t, blobs, 2+6)
+	}
+}
+
+// The first view seeded in part cuts a unit alone: when that shows the
+// cache cold, the workers after it start with whole views and nothing is
+// cut twice but the one unit that found out.
+func TestRecentViewsProbe(t *testing.T) {
+	f := setup(t)
+	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
+	dir := filepath.Join(shared, "sha256")
+	assert.NoError(t, os.MkdirAll(dir, 0755))
+	assert.NoError(t, os.WriteFile(filepath.Join(dir, "abc123"), []byte("x"), 0644))
+	old := time.Now().Add(-48 * time.Hour)
+	assert.NoError(t, os.Chtimes(filepath.Join(dir, "abc123"), old, old))
+	t.Setenv("FAKE_CACHE", "abc123")
+	t.Setenv("FAKE_SLEEP", "0.2")
+	var log, out strings.Builder
+	p, err := New(context.Background(), Options{Runner: f.runner, Jobs: 4, Cache: shared, Name: "t", RecentViews: time.Hour, Log: &log, Verbose: &out})
+	assert.NoError(t, err)
+	var groups []Group
+	for _, pkg := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		groups = append(groups, group("rel", "amd64", pkg+"_x", pkg+"_y"))
+	}
+	err = p.Pass(groups, func(c Cut) bool {
+		assert.NoError(t, c.Err)
+		return true
+	})
+	assert.NoError(t, err)
+	p.Close()
+	assert.Equal(t, log.String(), "")
+	assert.Equal(t, strings.Count(out.String(), "again, in a whole cache view"), 1, out.String())
+	// One view seeded with nothing, the probe's, and the others whole.
+	thin := regexp.MustCompile(`-cache-view 0\n`).FindAllString(out.String(), -1)
+	assert.Len(t, thin, 1)
+	assert.That(t, len(regexp.MustCompile(`-cache-view \d+\n`).FindAllString(out.String(), -1)) > 1, out.String())
+	assert.Len(t, f.cuts(t), 16+1)
+}
+
+// A probing worker whose unit was skipped has cut nothing and proved
+// nothing: its merge must still let the waiting workers go, and into whole
+// views, or they wait for ever with units the pass cannot end without
+// (views.fizz, D1).
+func TestProbeThatCutsNothingLetsGo(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "chisel")
+	assert.NoError(t, os.MkdirAll(filepath.Join(shared, "sha256"), 0755))
+	// An old blob, so that a view seeded in part is one.
+	blob := filepath.Join(shared, "sha256", "abc123")
+	assert.NoError(t, os.WriteFile(blob, []byte("x"), 0644))
+	old := time.Now().Add(-240 * time.Hour)
+	assert.NoError(t, os.Chtimes(blob, old, old))
+	p, err := New(context.Background(), Options{Runner: &cut.Runner{Bin: "true"}, Jobs: 3, Cache: shared})
+	assert.NoError(t, err)
+	defer p.Close()
+	w := p.worker(true)
+	w.prepare(Unit{Arch: "amd64", Slice: "bash_a"})
+	assert.That(t, w.probe && w.view != nil, "the first worker with a view probes")
+	select {
+	case <-p.probed:
+		t.Fatal("proved before anything was cut")
+	default:
+	}
+	assert.That(t, w.view.Partial(), "the probing view is seeded in part")
+	// A second worker waits for the probe with a unit in hand.
+	w2 := p.worker(true)
+	waited := make(chan struct{})
+	go func() {
+		w2.prepare(Unit{Arch: "amd64", Slice: "bash_b"})
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("the second worker did not wait for the probe")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// The unit is skipped: no cut, then the loop's merge.
+	w.merge()
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the waiting worker was not let go")
+	}
+	assert.That(t, p.whole, "views are to be whole")
+	assert.That(t, !w.probe, "the probe is over")
+	assert.That(t, w2.view != nil && !w2.view.Partial(), "the worker let go has a whole view")
+	w.close()
+	w2.close()
 }
