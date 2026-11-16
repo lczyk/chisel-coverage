@@ -533,3 +533,53 @@ func TestRecentViewsProbe(t *testing.T) {
 	assert.That(t, len(regexp.MustCompile(`-cache-view \d+\n`).FindAllString(out.String(), -1)) > 1, out.String())
 	assert.Len(t, f.cuts(t), 16+1)
 }
+
+// A probing worker whose unit was skipped has cut nothing and proved
+// nothing: its merge must still let the waiting workers go, and into whole
+// views, or they wait for ever with units the pass cannot end without
+// (views.fizz, D1).
+func TestProbeThatCutsNothingLetsGo(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "chisel")
+	assert.NoError(t, os.MkdirAll(filepath.Join(shared, "sha256"), 0755))
+	// An old blob, so that a view seeded in part is one.
+	blob := filepath.Join(shared, "sha256", "abc123")
+	assert.NoError(t, os.WriteFile(blob, []byte("x"), 0644))
+	old := time.Now().Add(-240 * time.Hour)
+	assert.NoError(t, os.Chtimes(blob, old, old))
+	p, err := New(context.Background(), Options{Runner: &cut.Runner{Bin: "true"}, Jobs: 3, Cache: shared})
+	assert.NoError(t, err)
+	defer p.Close()
+	w := p.worker(true)
+	w.prepare(Unit{Arch: "amd64", Slice: "bash_a"})
+	assert.That(t, w.probe && w.view != nil, "the first worker with a view probes")
+	select {
+	case <-p.probed:
+		t.Fatal("proved before anything was cut")
+	default:
+	}
+	assert.That(t, w.view.Partial(), "the probing view is seeded in part")
+	// A second worker waits for the probe with a unit in hand.
+	w2 := p.worker(true)
+	waited := make(chan struct{})
+	go func() {
+		w2.prepare(Unit{Arch: "amd64", Slice: "bash_b"})
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("the second worker did not wait for the probe")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// The unit is skipped: no cut, then the loop's merge.
+	w.merge()
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the waiting worker was not let go")
+	}
+	assert.That(t, p.whole, "views are to be whole")
+	assert.That(t, !w.probe, "the probe is over")
+	assert.That(t, w2.view != nil && !w2.view.Partial(), "the worker let go has a whole view")
+	w.close()
+	w2.close()
+}

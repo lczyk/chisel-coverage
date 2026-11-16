@@ -539,14 +539,20 @@ func (w *worker) merge() {
 			w.p.verbosef("cache views made whole: a blob was fetched again")
 		}
 	}
-	if w.cuts {
-		w.proved()
+	// A probing worker that has cut nothing, its unit skipped, has proved
+	// nothing either, and the workers waiting for it hold units the pass
+	// cannot end without: views are to be whole, and then they go on.
+	if w.probe && !w.cuts {
+		w.p.mu.Lock()
+		w.p.whole = true
+		w.p.mu.Unlock()
 	}
+	w.proved()
 }
 
 // proved lets the workers waiting for the first view seeded in part go on,
-// once that view's worker has cut and merged: by then the pool knows
-// whether such a view will do.
+// once that view's worker has merged: by then the pool knows whether such
+// a view will do, or has said views are to be whole.
 func (w *worker) proved() {
 	if w.probe {
 		w.probe = false
