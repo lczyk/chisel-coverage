@@ -61,6 +61,7 @@ the building blocks are importable as `github.com/lczyk/chisel-coverage/pkg`, a 
 - `pkg/pool` -- the worker pool under it, for cuts of any release dir: hand it units, get each finished cut back while its rootfs still exists.
 - `pkg/packageslicesfile`, `pkg/cut`, `pkg/cache`, `pkg/inrelease`, `pkg/release` -- the other pieces it is made of: package slices files stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, a suite's `InRelease` fetched once a run, `--release` resolution.
 - `pkg/fold` -- normalise what names the architecture in a path, and fold architectures on what they share.
+- `pkg/pathtree` -- draw a report's paths as a tree, a run of directories with nothing else in them as one line.
 
 ```shell
 go get github.com/lczyk/chisel-coverage/pkg
