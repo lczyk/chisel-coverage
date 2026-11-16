@@ -47,7 +47,8 @@ e2e:  ## Run the end-to-end test (needs `chisel` + network; override CHISEL=..)
 	CHISEL_COVERAGE_E2E=1 go test -tags e2e -count=1 -v ./e2e/...
 
 .PHONY: fizz
-fizz:  ## Model-check pkg/pool/views.fizz (needs fizzbee): three configurations pass, two designs fail
+fizz:  ## Model-check pkg/pool/views.fizz and pkg/cache/kept.fizz (needs fizzbee): the configurations that pass, the designs that fail
+	@sh pkg/cache/kept.sh
 	@sh pkg/pool/views.sh
 
 .PHONY: lint

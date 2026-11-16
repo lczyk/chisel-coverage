@@ -14,9 +14,11 @@ go.work.sum
 .DS_Store
 *.swp
 
-# fizzbee runs of pkg/pool/views.fizz
+# fizzbee runs of pkg/pool/views.fizz and pkg/cache/kept.fizz
 pkg/pool/out/
 pkg/pool/*.json
+pkg/cache/out/
+pkg/cache/*.json
 
 # go test binaries
 *.test

@@ -11,18 +11,24 @@ options:
 # the code; this is not a transcription of them and proves nothing of them
 # line by line. It checks the protocol they are meant to follow.
 #
-# three configurations, since one of everything is more states than the
+# five configurations, since one of everything is more states than the
 # checker gets through (480k and counting after 25 minutes):
 #   views (as written): two groups of a lead and one unit, no group is
 #     stopped, every outcome and need. Retry, a blob fetched again, views
-#     made whole, the probe. 25279 states.
+#     made whole, the probe. 27485 states.
 #   stops: one group of a lead and two units and a lone lead, one stop,
 #     clean cuts but for what they need. The skip, the prober that cuts
-#     nothing (D1), letting go. 97456 states.
+#     nothing (D1), letting go. 102344 states.
 #   later: as stops with a unit after the second lead and no old blob
-#     needed: the prober that let go cuts again. 27354 states.
+#     needed: the prober that let go cuts again. 30468 states.
+#   kept: as views with clean cuts, and a view that may lack nothing
+#     though seeded in part, as one kept from an earlier run may: it
+#     neither probes nor waits. 21421 states.
+#   kept4: four workers and three lone leads, a view that may lack
+#     nothing, no old blob needed: two views seeded in part behind one
+#     that lacks nothing (D3). 30375 states.
 #
-# run:   make fizz    (the three, and the two designs that must fail)
+# run:   make fizz    (the five, and the three designs that must fail)
 # by hand, fizzbee 0.5.4:
 #   timeout -k 10 600 fizz views.fizz
 #   timeout -k 10 600 fizz --preinit-hook "$STOPS" views.fizz
@@ -31,6 +37,10 @@ options:
 # that must fail is the stops configuration and a line more:
 #   FIX = "none"      a deadlock: the pass hangs (R2)
 #   FIX = "release"   fails R3
+# kept is KINDS = ["ok"] and SEEDS = ["thin", "whole"]; kept4 is W = 4,
+# GROUPS = [0, 0, 0], KINDS = ["ok"], NEEDS = ["recent"] and that SEEDS.
+# The third design that must fail is kept4 and a line more:
+#   ORDER = "decide_first"   fails R3
 #
 # requirements
 #
@@ -42,9 +52,10 @@ options:
 #      need, the network does and the caller answers, as long as every cut
 #      and every callback returns.
 # R3:  WHILE no view seeded in part has cut a unit and merged, THE POOL
-#      SHALL make no second view seeded in part.
+#      SHALL let no second view seeded in part cut.
 # R4:  IF the probing view's first cut lacked a blob the shared cache had,
-#      THEN THE POOL SHALL seed no other view in part.
+#      THEN THE POOL SHALL let no other view cut while it is seeded in
+#      part.
 # R5:  WHEN a worker has seen that views are to be whole, THE POOL SHALL
 #      not cut in that worker's view while it is seeded in part.
 # R6:  THE POOL SHALL let at most one cut a worker lack a blob the shared
@@ -67,7 +78,10 @@ options:
 # assumptions, each a thing the code can meet and the model does not
 #
 # - a fresh pool with a positive window: no view is left from an earlier
-#   pass, so prepare's first case is only "views are to be whole".
+#   pass, so every worker's view comes from the cache. That one may be a
+#   view kept from an earlier run (../cache/kept.fizz is how a run comes
+#   by it): it has what it had then and what was used of late since, so
+#   it lacks old blobs or, made whole back then, lacks none.
 # - every cut and every callback returns.
 # - the shared cache only grows during the pass: a blob it has stays. So a
 #   blob it had at the start is "of late" or "old" for the whole pass. A
@@ -91,7 +105,9 @@ options:
 # - worker 0 cuts in the shared cache and has no view. The others are
 #   isolated and get a view on their first unit.
 # - a view is "thin" (seeded in part and lacking the old blobs) or "whole".
-#   A thin view that happens to lack nothing is a whole one here.
+#   A thin view that happens to lack nothing is a whole one here: SEEDS is
+#   what seeding in part may give, "thin" alone when every view is made
+#   new and alike, "whole" too when a kept view may lack nothing.
 # - a unit cut in the shared cache or in a whole view is "ok": its own
 #   failures take no branch of the protocol there. In a thin view it is
 #   "ok" or "bad", a failure of its own, which is cut again. A failure for
@@ -108,17 +124,17 @@ options:
 # between to any effect; what else it does is the worker's own. Each stands
 # for:
 # - take: one receive from the queue.
-# - prepare: the first p.mu section of prepare (probe, wait or neither)
-#   and, for a worker that does not wait, the second, where whole is
-#   read, then p.seeding held over cache.NewRecent. Between the two
-#   sections whole can only have turned true through a view seeded in
-#   part: the prober has the only one and has not cut, and a worker that
-#   saw whole true sees it true again. The view is the worker's own
-#   until it has it, and what NewRecent reads of the shared cache is
-#   fixed by the assumption above.
-# - wait: the receive from probed, then the second p.mu section and the
-#   seeding, as above. whole turning true between the wake and the read
-#   is the same as the wake coming after it.
+# - prepare: the first p.mu section of prepare, where whole is read for
+#   the window, then p.seeding held over cache.NewRecent. The view is the
+#   worker's own until it has it, and what NewRecent reads of the shared
+#   cache is fixed by the assumption above. whole turning true during the
+#   seeding is read again at the gate.
+# - gate: the second p.mu section, for a view that lacks blobs: whole and
+#   probed read, and probed made by the first to come. A worker that sees
+#   whole true has its view made whole before it cuts, which is the cut
+#   step's Complete, the view being its own.
+# - wait: the receive from probed, then whole(false), which reads whole
+#   under p.mu and Completes the worker's own view.
 # - skipcheck: the pm section reading stopped. A worker whose view is not
 #   seeded in part goes from here to done: its cut reads and writes
 #   nothing shared.
@@ -167,6 +183,16 @@ options:
 #     having cut says views are to be whole, then lets the waiters go.
 #     pool.go was "none" when this was written; the test
 #     TestProbeThatCutsNothingLetsGo pins "whole".
+# D3: with views kept between runs a view seeded in part may lack
+#     nothing, and who probes and who waits was settled before the view
+#     was there to look at. A prober whose view lacks nothing cuts, merges
+#     and lets the waiters go, having shown nothing of views that do lack
+#     blobs: two of them then cut unproven. ORDER "decide_first" is that
+#     design and fails R3 with three workers behind the first. The one
+#     kept, "seed_first", gets the view first: only one that lacks blobs
+#     probes or waits, and one that lacks none just cuts. The waiters'
+#     views are seeded while the probe cuts, not after. The test
+#     TestKeptViewLackingNothingDoesNotProbe pins it.
 # D2: a oneof assigned straight to a field of a record in a list
 #     (workers[i].outcome = oneof KINDS) does not reach the record in
 #     fizzbee 0.5.4. It goes through a local.
@@ -185,6 +211,7 @@ options:
 #   the units after a lead are never queued                          R1 EveryUnitAccountedFor
 #   FIX "none"                                                       R2, as a deadlock
 #   FIX "release"                                                    R3 OneThinViewUntilProven
+#   ORDER "decide_first" (kept4)                                     R3 OneThinViewUntilProven
 
 W = 3            # workers, the first without a view
 GROUPS = [1, 1]  # per group, the units after its lead
@@ -195,6 +222,9 @@ MUTANT = ""      # for the mutation runs: no_retry, no_complete, no_merge_whole,
                  # retry_forgets, close_first
 
 NEEDS = ["recent", "old"]
+SEEDS = ["thin"]         # what seeding in part gives: with "whole" too, a
+                         # kept view that lacks nothing
+ORDER = "seed_first"     # or "decide_first"
 
 # plan is every unit as (group, is the lead).
 def plan(groups):
@@ -219,7 +249,7 @@ action Init:
     units = [record(g=x[0], lead=x[1], state="new") for x in plan(GROUPS)]
     # outcome is what the worker's chisel last said: "", ok, bad, missing
     workers = [record(pc="idle", item=-1, isolate=(i > 0), view="none", probe=False, was_probe=False,
-                      cuts=False, pending=False, refetched=False, outcome="", own="", let_go=False,
+                      cuts=False, cut_thin=False, pending=False, refetched=False, outcome="", own="", let_go=False,
                       owes_whole=False, dirty=0) for i in range(W)]
     queue = [u for u in range(len(units)) if units[u].lead]
     closed = False
@@ -256,6 +286,36 @@ atomic fair action Step:
             workers[i].pc = "close"
     elif pc == "prepare":
         workers[i].isolate = False
+        if ORDER == "decide_first":
+            # the design before views were kept: who probes and who waits
+            # is settled before the view is there to look at
+            if whole:
+                workers[i].view = "whole"
+                workers[i].pc = "skipcheck"
+            elif probed == "nil":
+                probed = "open"
+                workers[i].probe = True
+                workers[i].was_probe = True
+                got = oneof SEEDS
+                workers[i].view = got
+                if got == "thin":
+                    thin_made = thin_made + 1
+                workers[i].pc = "skipcheck"
+            else:
+                workers[i].pc = "wait"
+        else:
+            # the view first: seeded, or a kept one taken and brought up
+            # to date, whole when views are to be
+            got = "whole"
+            if not whole:
+                got = oneof SEEDS
+            workers[i].view = got
+            if got == "thin":
+                workers[i].pc = "gate"
+            else:
+                workers[i].pc = "skipcheck"
+    elif pc == "gate":
+        # only a view seeded in part probes or waits
         if whole:
             workers[i].view = "whole"
             workers[i].pc = "skipcheck"
@@ -263,7 +323,6 @@ atomic fair action Step:
             probed = "open"
             workers[i].probe = True
             workers[i].was_probe = True
-            workers[i].view = "thin"
             thin_made = thin_made + 1
             workers[i].pc = "skipcheck"
         else:
@@ -271,8 +330,12 @@ atomic fair action Step:
     elif pc == "wait":
         if whole:
             workers[i].view = "whole"
+        elif ORDER == "decide_first":
+            got = oneof SEEDS
+            workers[i].view = got
+            if got == "thin":
+                thin_made = thin_made + 1
         else:
-            workers[i].view = "thin"
             thin_made = thin_made + 1
         workers[i].pc = "skipcheck"
     elif pc == "skipcheck":
@@ -296,6 +359,7 @@ atomic fair action Step:
         workers[i].cuts = True
         outcome = "ok"
         if workers[i].view == "thin":
+            workers[i].cut_thin = True
             if saw_whole:
                 late_thin_cut = True
             outcome = oneof KINDS
@@ -362,7 +426,7 @@ atomic fair action Step:
             say_whole = True
         # A view seeded in part has cut and merged: the proof, whoever
         # closes the channel and whenever.
-        if workers[i].probe and workers[i].cuts:
+        if workers[i].probe and workers[i].cut_thin:
             proven = True
         if MUTANT == "close_first":
             # the channel closed here, whole only said at the next step
@@ -510,6 +574,10 @@ exists assertion TheProberLetsGoUnproven:
 # and this one a unit left to cut in another group
 exists assertion TheProberThatLetGoCutsLater:
     return MAX_STOPS == 0 or GROUPS[len(GROUPS) - 1] == 0 or len([w for w in workers if w.let_go and w.cuts]) > 0
+
+# a kept view lacking nothing cuts beside a probe not yet proven
+exists assertion AKeptViewSkipsTheProbe:
+    return "whole" not in SEEDS or ORDER != "seed_first" or len([w for w in workers if w.pc == "done" and w.view == "whole" and not w.was_probe]) > 0 and not proven and not whole and probed == "open"
 
 exists assertion AProberProves:
     return proven

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Model-checks views.fizz with fizzbee: the three configurations that must
-# pass and the two designs that must fail, each as its header says.
+# Model-checks views.fizz with fizzbee: the five configurations that must
+# pass and the three designs that must fail, each as its header says.
 set -eu
 cd "$(dirname "$0")"
 
@@ -11,6 +11,13 @@ later='GROUPS = [2, 1]
 MAX_STOPS = 1
 KINDS = ["ok"]
 NEEDS = ["recent"]'
+kept='KINDS = ["ok"]
+SEEDS = ["thin", "whole"]'
+kept4='W = 4
+GROUPS = [0, 0, 0]
+KINDS = ["ok"]
+NEEDS = ["recent"]
+SEEDS = ["thin", "whole"]'
 
 # check <what the output must hold> <name> [fizz arguments]
 check() {
@@ -31,7 +38,11 @@ check() {
 check PASSED views
 check PASSED stops --preinit-hook "$stops"
 check PASSED later --preinit-hook "$later"
+check PASSED kept --preinit-hook "$kept"
+check PASSED kept4 --preinit-hook "$kept4"
 check DEADLOCK 'stops, FIX none' --preinit-hook "$stops
 FIX = \"none\""
 check OneThinViewUntilProven 'stops, FIX release' --preinit-hook "$stops
 FIX = \"release\""
+check OneThinViewUntilProven 'kept4, ORDER decide_first' --preinit-hook "$kept4
+ORDER = \"decide_first\""

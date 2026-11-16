@@ -1,0 +1,376 @@
+---
+deadlock_detection: true
+options:
+  max_actions: 200
+  crash_on_yield: false
+---
+# kept.fizz -- a fizzbee model of how runs come by the views of chisel's
+# cache that are kept between them: a run takes a kept view no other run has,
+# or makes one, works in it and lets it go, and on its way in sweeps the
+# views no run has taken for a day. cache.go is the code (take, lockKept,
+# sweep, Release) with ../pool/pool.go's worker.enter; this is not a
+# transcription of them and proves nothing of them line by line. It checks
+# the protocol they are meant to follow. What a worker then does with its
+# view during a pass is ../pool/views.fizz.
+#
+# two configurations, since three runs with everything is more states than
+# the checker gets through in ten minutes:
+#   pair (as written): two runs, two kept views, two days going by, one
+#     run dying. 19009 states.
+#   three: three runs, one kept view, one day going by, no run dying: a
+#     run holding the view, one sweeping it and one after it. 56026 states.
+#
+# run:   make fizz    (the two, and the three designs that must fail)
+# by hand, fizzbee 0.5.4:
+#   timeout -k 10 600 fizz kept.fizz
+#   timeout -k 10 600 fizz --preinit-hook "$THREE" kept.fizz
+# with THREE the lines   W = 3   KEPT = 1   AGES = 1   CRASHES = 0
+# A design that must fail is the pair and a line more:
+#   DESIGN = "noverify"   fails K2
+#   DESIGN = "nolock"     fails K3
+#   INHERIT = False       fails K1
+#
+# requirements
+#
+# K1:  THE CACHE SHALL give a view to one run at a time: no two runs work
+#      in one view at once, and no run works in a view where a chisel of a
+#      run that died still runs.
+# K2:  WHILE a run works in a view, THE CACHE SHALL keep the view where it
+#      is: no sweep removes it.
+# K3:  THE CACHE SHALL sweep a view only when it has gone a day without a
+#      run taking it and no run has it.
+# K4:  WHEN a run ends or dies, THE CACHE SHALL hold none of its views for
+#      it: a lock has a live run behind it, or a chisel still running.
+# K5:  THE CACHE SHALL let every run end: a run waits for no other run.
+# K6:  THE CACHE SHALL make a view only for a run that found no kept one
+#      free, so the views kept are no more than were ever wanted at once.
+#
+# invariants: K1, K2, K3, K4, K6. progress: K5.
+#
+# the boundary
+#
+# system: take and lockKept (list, open the lock file, lock it without
+# waiting, look whether it is still the view's, touch), the making of a new
+# view, sweep, Release.
+# environment: time (a view goes a day untaken, whether a run has it or
+# not), a run dying anywhere, and the chisel a run that died while cutting
+# leaves running for a while.
+#
+# assumptions, each a thing the code can meet and the model does not
+#
+# - the lock is flock's: on the open file, so on the inode as it was when
+#   opened, held by every process that has the open file, gone when the
+#   last of them has closed it or died. Taking it never waits.
+# - a rename of a view's dir is one step, and a file that was opened stays
+#   lockable after its dir was renamed or removed.
+# - a view is made under a name no run lists, locked, then renamed in one
+#   step, so it is first seen kept and taken.
+# - a run of a release that keeps no views does not know these: it sweeps
+#   only the view-* dirs of its own kind, which a kept view is not.
+# - the views are on one filesystem that keeps flock's promise. On one that
+#   does not (some network mounts) two runs may take one view, as two
+#   chisels in one cache.
+#
+# abstractions
+#
+# - a view is where it is: kept (under its name), trash (renamed away) or
+#   gone. What it holds is not here: bringing a taken view up to date is
+#   the run's own, with the lock held.
+# - "stale" is a day gone since the view was last taken or let go. A run
+#   that takes a view touches it.
+# - a run sweeps at most one view, then takes one, works once, lets go.
+# - a run that dies while its chisel runs leaves the chisel running in the
+#   view until OrphanEnds. With INHERIT the chisel has the lock file open.
+#
+# what an atomic step merges
+#
+# every step of a run is one atomic block of the one Step action. A step
+# holds one system call on what runs share (the dir of views, a lock), or
+# what is the run's own.
+# - sweep, pick: the listing of the dir and the open of one lock file. A
+#   view renamed away between the two is one whose file does not open, the
+#   same as one not listed.
+# - sweep_lock, lock: flock without waiting.
+# - sweep_verify, verify: the two stats and their comparison, with the
+#   lock held: a view can only leave its place under its lock, so nothing
+#   comes between them to any effect. The sweep also reads the view's time
+#   again here.
+# - sweep_rename: the rename to trash, then the close of the lock. The
+#   removal of the trash is no one's to see.
+# - take: the touch, then bringing the view up to date, under the lock.
+# - work: the run's chisels start in the view.
+# - release: the touch and the close of the lock.
+#
+# not modelled: what a view holds and how it is brought up to date, a view
+# that cannot be made, new-* and trash-* dirs a dead run left (no run takes
+# them: they are removed a day later), and runs that keep no views.
+#
+# decisions the model forced
+#
+# D1: a lock got is not yet a lock on a view. A run opens a view's lock
+#     file, a sweep holding the lock renames the view away and lets go, and
+#     the run's flock then succeeds on a file that is no view's: it works
+#     in a dir being removed. DESIGN "noverify" is that and fails K2. The
+#     design kept looks, once it has the lock, whether the file at the
+#     view's path is still the one it holds.
+# D2: a sweep that only looks at a view's time removes one a run has: the
+#     time says when it was taken, not whether. DESIGN "nolock" fails K3.
+#     The sweep takes the lock first and reads the time again with it.
+# D3: a run that dies leaves its chisel running, and its lock is gone with
+#     it: the next run takes the view and starts a chisel beside the old
+#     one, two chisels in one cache, which views exist to prevent. INHERIT
+#     False is that and fails K1. The chisel is started with the lock file
+#     open (cut.Runner.Inherit), so the lock outlives the run by as long
+#     as the chisel does.
+#
+# mutation runs, each a change to the model and the assertion that then
+# fails:
+#   sweep_fresh     the sweep does not read the time again     K3 OnlyStaleAndFreeIsSwept
+#   no_touch        taking a view does not touch it            K3 OnlyStaleAndFreeIsSwept
+#   no_unlock       a run ends with its lock held              K4 ALockHasALiveOwner
+#   DESIGN "noverify"                                          K2 AViewInUseStays
+#   DESIGN "nolock"                                            K3 OnlyStaleAndFreeIsSwept
+#   INHERIT False                                              K1 OneRunAView
+
+W = 2            # runs
+KEPT = 2         # views kept from earlier runs, free at the start
+AGES = 2         # times a view goes stale
+CRASHES = 1      # runs that die
+DESIGN = "verify"   # or "noverify", "nolock"
+INHERIT = True      # a run's chisel holds the lock too
+MUTANT = ""         # for the mutation runs: sweep_fresh, no_unlock, no_touch
+
+def movable(r):
+    return r.pc != "exit" and r.pc != "dead"
+
+def all_over(runs):
+    return len([r for r in runs if movable(r)]) == 0
+
+action Init:
+    # where: kept, trash, gone. holder: the run whose lock it is, -1 none.
+    # holder -2 is a chisel a dead run left running. orphan: such a chisel
+    # runs in the view.
+    views = [record(where="kept", holder=-1, stale=False, orphan=False, dead_runs=False, used=False) for k in range(KEPT)]
+    # fd: the view whose lock file the run has open, -1 none. tried: views
+    # the run passed over this phase. sweeps: stale views it may still try.
+    runs = [record(pc="sweep", fd=-1, view=-1, tried=[], swept=False) for i in range(W)]
+    # witnesses
+    used_twice = False      # two runs worked in one view at once
+    used_gone = False       # a run worked in a view no longer kept
+    bad_sweep = False       # a view went to the trash fresh, or held by another
+    reuses = 0              # a kept view taken by a run
+    sweeps = 0              # a stale view swept
+    lost_races = 0          # a lock got on a view that had gone meanwhile
+    made = 0                # views made new
+    after_crash = False     # a view a dead run held was taken again
+    orphan_held = False     # a run passed over a view a left chisel held
+    ages = 0
+    crashes = 0
+
+# a day goes by for a view, taken or not
+atomic action Age:
+    require ages < AGES
+    j = oneof [k for k in range(len(views)) if views[k].where == "kept" and not views[k].stale]
+    views[j].stale = True
+    views[j].used = False
+    ages = ages + 1
+
+# a run dies, wherever it is: its locks go with it, but for the one its
+# chisel, still running, holds too
+atomic action Crash:
+    require crashes < CRASHES
+    i = oneof [k for k in range(W) if movable(runs[k])]
+    crashes = crashes + 1
+    for k in range(len(views)):
+        if views[k].holder == i:
+            views[k].holder = -1
+            if runs[i].pc == "release" and runs[i].view == k:
+                views[k].orphan = True
+                views[k].dead_runs = True
+                if INHERIT:
+                    views[k].holder = -2
+    runs[i].pc = "dead"
+    runs[i].fd = -1
+
+atomic fair action OrphanEnds:
+    j = oneof [k for k in range(len(views)) if views[k].orphan]
+    views[j].orphan = False
+    if views[j].holder == -2:
+        views[j].holder = -1
+
+atomic fair action Step:
+    i = oneof [k for k in range(W) if movable(runs[k])]
+    pc = runs[i].pc
+    f = runs[i].fd
+    if pc == "sweep":
+        # one stale view at most, or none: then on to a view of its own
+        cands = [k for k in range(len(views)) if views[k].where == "kept" and views[k].stale and k not in runs[i].tried]
+        go = oneof [True, False]
+        if len(cands) > 0 and go and not runs[i].swept:
+            j = oneof cands
+            runs[i].tried = runs[i].tried + [j]
+            runs[i].fd = j
+            if DESIGN == "nolock":
+                runs[i].pc = "sweep_rename"
+            else:
+                runs[i].pc = "sweep_lock"
+        else:
+            runs[i].tried = []
+            runs[i].pc = "pick"
+    elif pc == "sweep_lock":
+        if views[f].holder == -1:
+            views[f].holder = i
+            runs[i].pc = "sweep_verify"
+        else:
+            runs[i].fd = -1
+            runs[i].pc = "sweep"
+    elif pc == "sweep_verify":
+        # the lock is on what was opened: is it still the kept view, and
+        # still stale?
+        if views[f].where == "kept" and (views[f].stale or MUTANT == "sweep_fresh"):
+            runs[i].pc = "sweep_rename"
+        else:
+            views[f].holder = -1
+            runs[i].fd = -1
+            runs[i].pc = "sweep"
+    elif pc == "sweep_rename":
+        if views[f].where == "kept":
+            if not views[f].stale or views[f].used or (views[f].holder != i and views[f].holder != -1):
+                bad_sweep = True
+            if len([r for r in runs if r.pc == "work" and r.view == f]) > 0:
+                used_gone = True
+            views[f].where = "trash"
+            sweeps = sweeps + 1
+        if views[f].holder == i:
+            views[f].holder = -1
+        runs[i].fd = -1
+        runs[i].swept = True
+        runs[i].pc = "sweep"
+    elif pc == "pick":
+        cands = [k for k in range(len(views)) if views[k].where == "kept" and k not in runs[i].tried]
+        if len(cands) > 0:
+            j = oneof cands
+            runs[i].tried = runs[i].tried + [j]
+            runs[i].fd = j
+            runs[i].pc = "lock"
+        else:
+            # made under a name no one lists, locked, then renamed: it
+            # appears kept and held at once
+            views = views + [record(where="kept", holder=i, stale=False, orphan=False, dead_runs=False, used=False)]
+            runs[i].view = len(views) - 1
+            made = made + 1
+            runs[i].pc = "work"
+    elif pc == "lock":
+        if views[f].holder == -2:
+            orphan_held = True
+        if views[f].holder == -1:
+            views[f].holder = i
+            if DESIGN == "noverify":
+                runs[i].pc = "take"
+            else:
+                runs[i].pc = "verify"
+        else:
+            runs[i].fd = -1
+            runs[i].pc = "pick"
+    elif pc == "verify":
+        if views[f].where == "kept":
+            runs[i].pc = "take"
+        else:
+            lost_races = lost_races + 1
+            views[f].holder = -1
+            runs[i].fd = -1
+            runs[i].pc = "pick"
+    elif pc == "take":
+        # touched, synced with the shared cache: the run's own from here
+        if views[f].where == "kept" and MUTANT != "no_touch":
+            views[f].stale = False
+        views[f].used = True
+        if views[f].dead_runs:
+            after_crash = True
+        runs[i].view = f
+        runs[i].fd = -1
+        reuses = reuses + 1
+        runs[i].pc = "work"
+    elif pc == "work":
+        v = runs[i].view
+        if views[v].where != "kept":
+            used_gone = True
+        if len([k for k in range(W) if k != i and runs[k].pc in ["work", "release"] and runs[k].view == v]) > 0:
+            used_twice = True
+        # its chisel starts, beside one a dead run left there?
+        if views[v].orphan:
+            used_twice = True
+        runs[i].pc = "release"
+    elif pc == "release":
+        v = runs[i].view
+        if MUTANT != "no_unlock":
+            views[v].holder = -1
+        runs[i].pc = "exit"
+
+atomic action Finished:
+    require all_over(runs)
+    pass
+
+# K1
+always assertion OneRunAView:
+    if used_twice:
+        return False
+    for a in range(W):
+        for b in range(W):
+            if a < b and runs[a].pc in ["work", "release"] and runs[b].pc in ["work", "release"] and runs[a].view == runs[b].view:
+                return False
+    return True
+
+# K2
+always assertion AViewInUseStays:
+    if used_gone:
+        return False
+    for r in runs:
+        if r.pc in ["work", "release"] and views[r.view].where != "kept":
+            return False
+    return True
+
+# K3
+always assertion OnlyStaleAndFreeIsSwept:
+    return not bad_sweep
+
+# K4
+always assertion ALockHasALiveOwner:
+    for v in views:
+        if v.holder >= 0 and not movable(runs[v.holder]):
+            return False
+        if v.holder == -2 and not v.orphan:
+            return False
+    return True
+
+# K5
+always eventually assertion EveryRunEnds:
+    return all_over(runs)
+
+# K6: a view is made only when no kept one could be had
+always assertion NoMoreViewsThanRuns:
+    return len([v for v in views if v.where == "kept"]) <= KEPT + W
+
+exists assertion AKeptViewIsReused:
+    return reuses > 0
+
+exists assertion EveryKeptViewIsReused:
+    return reuses >= min(KEPT, W)
+
+exists assertion ALeftChiselHoldsItsView:
+    return CRASHES == 0 or not INHERIT or orphan_held
+
+exists assertion AStaleViewIsSwept:
+    return AGES == 0 or sweeps > 0
+
+exists assertion ALockOnAGoneViewIsDropped:
+    return DESIGN != "verify" or AGES == 0 or lost_races > 0
+
+exists assertion AViewIsMade:
+    return made > 0
+
+exists assertion ADeadRunsViewIsTakenAgain:
+    return CRASHES == 0 or after_crash
+
+exists assertion EveryRunWorks:
+    return len([r for r in runs if r.pc == "exit"]) == W
