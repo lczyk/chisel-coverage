@@ -59,7 +59,7 @@ the building blocks are importable as `github.com/lczyk/chisel-coverage/pkg`, a 
 
 - `pkg/cuts` -- cut every slice of every package on every architecture, scheduled so concurrent chisels never share a writable cache, and get each rootfs listing back.
 - `pkg/pool` -- the worker pool under it, for cuts of any release dir: hand it units, get each finished cut back while its rootfs still exists.
-- `pkg/packageslicesfile`, `pkg/cut`, `pkg/cache`, `pkg/suitecache`, `pkg/release` -- the other pieces it is made of: package slices files stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, a suite's `InRelease` fetched once a run, `--release` resolution.
+- `pkg/packageslicesfile`, `pkg/cut`, `pkg/cache`, `pkg/inrelease`, `pkg/release` -- the other pieces it is made of: package slices files stripped to what a deb can answer, one `chisel cut`, private views of chisel's cache, a suite's `InRelease` fetched once a run, `--release` resolution.
 - `pkg/fold` -- normalise what names the architecture in a path, and fold architectures on what they share.
 
 ```shell
