@@ -420,7 +420,7 @@ func TestResolveArches(t *testing.T) {
 
 // Every cut of a run is pointed at the pool's one proxy, over a proxy
 // setting of the user's own.
-func TestSuiteCache(t *testing.T) {
+func TestInReleaseProxy(t *testing.T) {
 	f := setup(t)
 	seen := filepath.Join(t.TempDir(), "proxy")
 	t.Setenv("FAKE_PROXY", seen)

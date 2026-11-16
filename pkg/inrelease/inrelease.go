@@ -1,20 +1,25 @@
-// Package suitecache spares a run of many chisel cuts the fetches every one
-// of them repeats. chisel takes packages and their indexes from its cache,
-// by digest, but asks the archive for each suite's InRelease anew on every
-// cut, which is most of what a small cut waits for. The package is an HTTP
-// forward proxy for the chisels of one run, reached through http_proxy,
-// which is the only lever: it answers an InRelease it has fetched before
-// from memory and passes everything else through as it is.
+// Package inrelease stops a run of many chisel cuts from fetching the same
+// InRelease files over and over.
 //
-// One run then sees one state of the archive. An index chisel has not
-// cached is still fetched from the archive as it is then, and chisel checks
-// it against the InRelease it was given, so an archive published in the
-// middle of a run fails a cut, loudly, where without the proxy only the cuts
-// started after it would see the new state.
+// The problem: chisel keeps packages and their indexes in its cache, but it
+// asks the archive for every suite's InRelease again on each cut. For a
+// small cut that is most of the time it takes.
 //
-// Archives reached over https, as ubuntu's esm ones, do not go through
-// http_proxy and are not seen here.
-package suitecache
+// The fix: an HTTP proxy that the chisels of one run are pointed at with
+// http_proxy. The first time an InRelease is asked for, the proxy fetches
+// it and keeps it in memory. After that it answers from memory. Every
+// other request is passed straight through to the archive.
+//
+// What this changes: all the cuts of a run see the archive as it was when
+// the run first asked. If the archive is published again in the middle of
+// a run, a cut that needs an index chisel has not cached yet gets the new
+// index, chisel finds it does not match the InRelease it was given, and
+// that cut fails with an error. Without the proxy the later cuts would
+// have quietly used the new state.
+//
+// What it does not touch: archives reached over https, such as ubuntu's
+// esm ones. They do not go through http_proxy.
+package inrelease
 
 import (
 	"io"

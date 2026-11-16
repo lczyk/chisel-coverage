@@ -1,4 +1,4 @@
-package suitecache
+package inrelease
 
 import (
 	"io"

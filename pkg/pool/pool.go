@@ -22,7 +22,7 @@ import (
 
 	"github.com/lczyk/chisel-coverage/pkg/cache"
 	"github.com/lczyk/chisel-coverage/pkg/cut"
-	"github.com/lczyk/chisel-coverage/pkg/suitecache"
+	"github.com/lczyk/chisel-coverage/pkg/inrelease"
 )
 
 // Options configures a pool.
@@ -48,8 +48,8 @@ type Options struct {
 	// made, so a cache that is cold for the run costs one worker's
 	// fetches and not every worker's.
 	RecentViews time.Duration
-	// Transport is what the pool's suite cache fetches through, see
-	// suitecache; as http.DefaultTransport when nil.
+	// Transport is what the pool's InRelease proxy fetches through, see
+	// inrelease; as http.DefaultTransport when nil.
 	Transport http.RoundTripper
 	Log       io.Writer // notices (--keep, cache trouble); nil discards
 	Verbose   io.Writer // one line per cut; nil discards
@@ -108,7 +108,7 @@ type Pool struct {
 	logMu    sync.Mutex    // the Log and Verbose writers
 	seeding  sync.Mutex    // views are seeded one at a time, see worker
 	views    []*cache.View // idle views, for the next worker
-	suites   *suitecache.Proxy
+	proxy    *inrelease.Proxy
 	whole    bool // views are to hold every blob from now on, see RecentViews
 	// probed is closed once the first view seeded in part has cut a unit
 	// and merged, nil until one is made: the others wait for it.
@@ -154,9 +154,9 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 	// The cuts fetch each suite's InRelease once a run and not once a cut,
 	// through a proxy of the pool's own. Without it they go to the archive
 	// themselves.
-	if p.suites, err = suitecache.Start(opts.Transport); err != nil {
-		p.suites = nil
-		p.logf("suite cache: %v; every cut fetches its own", err)
+	if p.proxy, err = inrelease.Start(opts.Transport); err != nil {
+		p.proxy = nil
+		p.logf("inrelease proxy: %v; every cut fetches its own", err)
 	}
 	if opts.Keep {
 		p.logf("rootfs dirs: %s", p.work)
@@ -288,8 +288,8 @@ func (p *Pool) Summary() {
 // Close waits for the rootfs removals and removes the views and, without
 // Options.Keep, the work dir.
 func (p *Pool) Close() {
-	if p.suites != nil {
-		_ = p.suites.Close()
+	if p.proxy != nil {
+		_ = p.proxy.Close()
 	}
 	p.rm.Wait()
 	p.removeViews()
@@ -408,8 +408,8 @@ func finish(work time.Duration, k, free int, seed time.Duration) time.Duration {
 // there is a cache dir.
 func (p *Pool) worker(isolate bool) *worker {
 	w := &worker{p: p, runner: *p.opts.Runner, isolate: isolate && p.opts.Cache != ""}
-	if p.suites != nil {
-		w.runner.HTTPProxy = p.suites.URL
+	if p.proxy != nil {
+		w.runner.HTTPProxy = p.proxy.URL
 	}
 	return w
 }
