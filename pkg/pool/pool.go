@@ -134,6 +134,9 @@ type worker struct {
 
 // New makes a pool and its work dir. When ctx is done the cuts stop.
 func New(ctx context.Context, opts Options) (*Pool, error) {
+	if opts.Runner == nil {
+		return nil, errors.New("no Runner given")
+	}
 	p := &Pool{ctx: ctx, opts: opts, jobs: Jobs(opts.Jobs), start: time.Now()}
 	pattern := opts.Temp
 	if pattern == "" {

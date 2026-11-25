@@ -622,3 +622,12 @@ func TestKeptViewLackingNothingDoesNotProbe(t *testing.T) {
 	w.close()
 	w2.close()
 }
+
+func TestNewNeedsRunner(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	_, err := New(context.Background(), Options{})
+	assert.Error(t, err, "no Runner given")
+	left, err := os.ReadDir(os.Getenv("TMPDIR"))
+	assert.NoError(t, err)
+	assert.Len(t, left, 0)
+}
