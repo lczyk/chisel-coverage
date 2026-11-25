@@ -103,7 +103,7 @@ func sample() []coverage.Package {
 
 func TestRenderText(t *testing.T) {
 	var out bytes.Buffer
-	renderText(&out, sample(), true, style{})
+	renderText(&out, sample(), true, false, style{})
 	assert.Equal(t, out.String(), `bash 5.2-1 [amd64, arm64]
 total 6 covered 3 ignored 1 uncovered 2
 /usr/lib/
@@ -129,7 +129,7 @@ func TestRenderTextBlocksPerShippedSet(t *testing.T) {
 	pkgs[0].Arches[1].Covered = append(pkgs[0].Arches[1].Covered, "/usr/bin/sh")
 	pkgs[0].Arches[1].Total = 7
 	var out bytes.Buffer
-	renderText(&out, pkgs, true, style{})
+	renderText(&out, pkgs, true, false, style{})
 	assert.Equal(t, out.String(), `bash 5.2-1 [amd64, arm64]
 total 6 covered 3 ignored 1 uncovered 2
 /usr/lib/
@@ -141,13 +141,13 @@ bash 5.2-1 [arm64]
 total 1 covered 1 ignored 0 uncovered 0
 `)
 	out.Reset()
-	renderText(&out, pkgs, false, style{})
+	renderText(&out, pkgs, false, false, style{})
 	assert.ContainsString(t, out.String(), "bash 5.2-1 [amd64]\ntotal 7 covered 3 ignored 1 uncovered 3\n/usr/lib/\n/usr/lib/x86_64-linux-gnu/\n/usr/lib/x86_64-linux-gnu/bash/\nbash 5.2-1 [arm64]\ntotal 7 covered 4 ignored 1 uncovered 2\n")
 }
 
 func TestRenderTextUngrouped(t *testing.T) {
 	var out bytes.Buffer
-	renderText(&out, sample()[:1], false, style{})
+	renderText(&out, sample()[:1], false, false, style{})
 	assert.Equal(t, out.String(), `bash 5.2-1 [amd64]
 total 6 covered 3 ignored 1 uncovered 2
 /usr/lib/
@@ -165,7 +165,7 @@ bash [s390x]: error
 
 func TestRenderTextColoured(t *testing.T) {
 	var out bytes.Buffer
-	renderText(&out, sample(), true, colours)
+	renderText(&out, sample(), true, false, colours)
 	assert.ContainsString(t, out.String(), "\x1b[1;34mbash\x1b[0m 5.2-1 \x1b[2m[amd64, arm64]\x1b[0m\n")
 	assert.ContainsString(t, out.String(), "total 6 \x1b[32mcovered 3\x1b[0m \x1b[33mignored 1\x1b[0m \x1b[31muncovered 2\x1b[0m\n/usr/lib/\n")
 	assert.ContainsString(t, out.String(), "total 1 \x1b[32mcovered 1\x1b[0m \x1b[32mignored 0\x1b[0m \x1b[32muncovered 0\x1b[0m\n")
@@ -305,9 +305,14 @@ func TestMainExitCodes(t *testing.T) {
 	assert.Equal(t, code, 0)
 	assert.ContainsString(t, out, `"arch": "amd64"`)
 
+	code, out = captureStdout(t, func() int { return Main([]string{"--release", rel, "--arch", "amd64", "-T", "demo"}) })
+	assert.Equal(t, code, 0)
+	assert.ContainsString(t, out, "uncovered 4\n/usr/share/\n"+boxes("L- doc/\n   L- demo/\n      L- README\n"))
+
 	for _, args := range [][]string{
 		nil,
 		{"--release", rel},
+		{"--release", rel, "--tree", "--json", "demo"},
 		{"--release", rel, "--arch", "x86", "demo"},
 		{"--release", rel, "--bogus", "demo"},
 		{"--release", t.TempDir(), "demo"},

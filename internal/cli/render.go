@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/lczyk/chisel-coverage/internal/coverage"
+	"github.com/lczyk/chisel-coverage/pkg/pathtree"
 )
 
 // style colours the text report. The zero value colours nothing.
@@ -56,21 +57,22 @@ func (s style) count(label string, n int, wantZero bool, warn string) string {
 // renderText prints one block per group of architectures (or per
 // architecture, when group is false), per package: a header line, a counts
 // line, then the uncovered paths one per line. Nothing is indented and no
-// line is blank, so the output greps and pipes. What each slice takes is
+// line is blank, so the output greps and pipes. With tree, a block's
+// uncovered paths are drawn as a tree instead. What each slice takes is
 // only in the JSON.
-func renderText(w io.Writer, pkgs []coverage.Package, group bool, s style) {
+func renderText(w io.Writer, pkgs []coverage.Package, group, tree bool, s style) {
 	for _, p := range pkgs {
 		groups := coverage.Ungrouped(p)
 		if group {
 			groups = coverage.Groups(p)
 		}
 		for _, g := range groups {
-			renderGroup(w, p, g, s)
+			renderGroup(w, p, g, tree, s)
 		}
 	}
 }
 
-func renderGroup(w io.Writer, p coverage.Package, g coverage.Group, s style) {
+func renderGroup(w io.Writer, p coverage.Package, g coverage.Group, tree bool, s style) {
 	name := s.wrap(s.name, p.Name)
 	arches := s.wrap(s.dim, "["+strings.Join(g.Arches, ", ")+"]")
 	switch {
@@ -93,9 +95,28 @@ func renderGroup(w io.Writer, p coverage.Package, g coverage.Group, s style) {
 		s.count("covered", len(g.Covered), false, s.yellow),
 		s.count("ignored", len(g.Ignored), true, s.yellow),
 		s.count("uncovered", len(g.Uncovered), true, s.red))
-	for _, path := range g.Uncovered {
-		fmt.Fprintln(w, path)
+	lines := g.Uncovered
+	if tree {
+		lines = treeLines(g.Uncovered, s)
 	}
+	for _, l := range lines {
+		fmt.Fprintln(w, l)
+	}
+}
+
+// treeLines draws a block's uncovered paths as a tree, as --tree shows them:
+// a path's name where the flat report has the path. A directory line is
+// either uncovered itself or drawn only to hold what is, and the tree does
+// not say which.
+func treeLines(paths []string, s style) []string {
+	line := func(i int, name string) string {
+		if strings.HasSuffix(paths[i], "/") {
+			name += "/"
+		}
+		return name
+	}
+	dim := func(t string) string { return s.wrap(s.dim, t) }
+	return pathtree.Draw(pathtree.Of(paths, line), dim)
 }
 
 type jsonOut struct {

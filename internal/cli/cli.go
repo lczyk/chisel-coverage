@@ -114,7 +114,7 @@ func Main(args []string) int {
 			return 2
 		}
 	} else {
-		renderText(os.Stdout, results, !f.NoGroup, styleFor(os.Stdout))
+		renderText(os.Stdout, results, !f.NoGroup, f.Tree, styleFor(os.Stdout))
 	}
 
 	code := 0
@@ -138,6 +138,7 @@ type flags struct {
 	Slices        []string `long:"slice" value-name:"<s>[,<s>...]" description:"only these slices, bare or <package>_<slice> (default: all)"`
 	Ignores       []string `long:"ignore" value-name:"<glob>[,...]" description:"leave matching paths out of the uncovered set (chisel glob syntax)"`
 	NoGroup       bool     `long:"no-group" description:"one block per architecture with its real paths, instead of folding architectures with the same result"`
+	Tree          bool     `short:"T" long:"tree" description:"draw each block's uncovered paths as a tree"`
 	JSON          bool     `long:"json" description:"machine-readable output, one entry per architecture"`
 	FailUncovered bool     `long:"fail-uncovered" description:"exit 1 when any architecture has uncovered paths"`
 	Keep          bool     `long:"keep" description:"keep the temp releases and rootfs dirs"`
@@ -183,6 +184,9 @@ func parseArgs(args []string, help io.Writer) (f flags, pkgs []string, err error
 	}
 	for _, l := range []*[]string{&f.Arches, &f.Slices, &f.Ignores} {
 		*l = splitLists(*l)
+	}
+	if f.Tree && f.JSON {
+		return f, nil, errors.New("--tree draws the text report, so it does not go with --json")
 	}
 	for i, pkg := range pkgs {
 		pkgs[i] = packageslicesfile.Package(pkg)
