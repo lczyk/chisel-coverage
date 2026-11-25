@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/lczyk/assert v0.7.2
-	github.com/lczyk/chisel-proxy/pkg v0.6.0
+	github.com/lczyk/chisel-proxy/pkg v0.6.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 
