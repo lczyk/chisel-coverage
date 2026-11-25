@@ -153,6 +153,10 @@ func Package(arg string) string {
 // essentials, mutate scripts, until, generated content and attributes are
 // dropped, and a copy entry is re-keyed by its source. Only path keys and their
 // arch lists survive. See design.md for why each goes.
+//
+// The file is read here and not through chisel on purpose, the format being
+// small and stable. Only slices/<pkg>.yaml is looked at: the subdirectories
+// of slices/ and format v3's bin-slices/, which chisel reads too, are left out.
 func Read(release, pkg string) (*File, error) {
 	path := filepath.Join(release, "slices", pkg+".yaml")
 	raw, err := os.ReadFile(path)
