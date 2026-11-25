@@ -13,27 +13,13 @@ import (
 	"github.com/lczyk/chisel-proxy/pkg/deb"
 )
 
-// words is what names an architecture as a word of a path: its own name,
-// the cpu of its multiarch triplet, and what debian's cross toolchain
-// package names, java, go, dotnet, libunwind, ruby and the kernel's arch
-// directories call it. x86 is both amd64's and i386's, as in the kernel
-// headers' arch/x86.
-var words = map[string][]string{
-	"amd64":   {"amd64", "x86_64", "x86-64", "x64", "x86"},
-	"arm64":   {"arm64", "aarch64"},
-	"armhf":   {"armhf", "arm"},
-	"i386":    {"i386", "i686", "x86", "386"},
-	"ppc64el": {"ppc64el", "powerpc64le", "ppc64le", "ppc64"},
-	"riscv64": {"riscv64", "riscv"},
-	"s390x":   {"s390x", "s390"},
-}
-
 // anyWord matches every architecture's words, longest first, so that x86_64
-// is amd64's word and not i386's x86 followed by _64.
+// is amd64's word and not i386's x86 followed by _64. The words are
+// deb.Words', the one table of what names an architecture.
 var anyWord = func() *regexp.Regexp {
 	var all []string
-	for _, ws := range words {
-		all = append(all, ws...)
+	for _, a := range deb.Arches() {
+		all = append(all, deb.Words(a)...)
 	}
 	sort.Slice(all, func(i, j int) bool { return len(all[i]) > len(all[j]) })
 	return regexp.MustCompile(strings.Join(all, "|"))
@@ -51,12 +37,9 @@ var abi = regexp.MustCompile(`<arch>-linux-gnu[a-z0-9]*`)
 // word of another architecture (x86_64 on i386) is left alone. A path of
 // an architecture chisel does not know is returned as it is.
 func Normalise(path, arch string) string {
-	own := words[arch]
+	own := deb.Words(arch)
 	if own == nil {
-		if !deb.ValidArch(arch) {
-			return path
-		}
-		own = []string{arch}
+		return path
 	}
 	var b strings.Builder
 	last := 0
