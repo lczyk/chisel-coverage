@@ -69,7 +69,8 @@ type Arch struct {
 	DebArch   string
 	// StandIn names the lead architecture whose cuts stand for this one: an
 	// arch: all package is one deb everywhere, so it is cut in full on the
-	// lead architecture only and probed on the rest. Slices is the lead's
+	// lead architecture only and probed on the rest, unless one of its
+	// slices takes a path on some architectures only. Slices is the lead's
 	// and Visit never ran for this architecture.
 	StandIn string
 	// Slices maps every slice that was to be cut (the real ones, the whole-deb
@@ -180,7 +181,8 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 	// The lead architecture alone first, so the rest find the arch: all debs
 	// cached and the arch: all packages known; then those packages are only
 	// probed on the other architectures, since an arch: all package has the
-	// same files everywhere it exists; then everything else.
+	// same files everywhere it exists, unless a slice takes some of them on
+	// some architectures only; then everything else.
 	var lead, probes, rest []unit
 	for pi := range r.prepared {
 		lead = append(lead, unit{pi, 0, 0})
@@ -188,7 +190,7 @@ func Run(ctx context.Context, opts Options, pkgs []string) ([]Package, error) {
 	r.pass(lead)
 	for ai := 1; ai < len(opts.Arches); ai++ {
 		for pi := range r.prepared {
-			if a := r.results[pi].Arches[0]; a.Available && a.Err == nil && a.DebArch == "all" {
+			if a := r.results[pi].Arches[0]; a.Available && a.Err == nil && a.DebArch == "all" && !r.prepared[pi].perArch() {
 				probes = append(probes, unit{pi, ai, 0})
 			} else {
 				rest = append(rest, unit{pi, ai, 0})
@@ -253,6 +255,20 @@ func (r *run) prepare(chiselYAML []byte, def *packageslicesfile.File, keep []str
 		}
 	}
 	return p, nil
+}
+
+// perArch reports whether a slice to be cut takes a path on some
+// architectures only, so that what it has on one architecture does not say
+// what it has on another.
+func (p *prepared) perArch() bool {
+	for _, name := range p.slices {
+		for _, e := range p.def.Slice(name).Entries {
+			if e.Arch != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Jobs is pool.Jobs.

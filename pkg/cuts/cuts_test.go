@@ -516,6 +516,30 @@ func TestRunArchAllPackagesAreProbed(t *testing.T) {
 	assert.That(t, !dash.Arches[2].Available)
 }
 
+// An arch: all package is one deb everywhere, but a slice may still take a
+// path on some architectures only. Then the lead's cuts do not stand for
+// the others, and the package is cut on every architecture.
+func TestRunArchAllWithArchEntriesIsCutEverywhere(t *testing.T) {
+	f := setup(t)
+	assert.NoError(t, os.WriteFile(filepath.Join(f.release, "slices", "dash.yaml"),
+		[]byte("package: dash\nslices:\n  bins:\n    contents:\n      /usr/bin/dash:\n      /usr/bin/dash-amd64: {arch: amd64}\n"), 0644))
+	for _, arch := range []string{"amd64", "arm64"} {
+		assert.NoError(t, os.WriteFile(filepath.Join(f.trees, arch, "dash.version"), []byte("0.5"), 0644))
+		touch(t, filepath.Join(f.trees, arch, "dash.all"))
+	}
+	touch(t, filepath.Join(f.trees, "amd64", "dash_bins/usr/bin/dash-amd64"))
+	res, err := Run(context.Background(), Options{Release: f.release, Arches: []string{"amd64", "arm64"}, Whole: true, Runner: f.runner}, []string{"dash"})
+	assert.NoError(t, err)
+	cuts := f.cuts(t)
+	assert.That(t, slices.Contains(cuts, "arm64 dash_bins"))
+	assert.That(t, !slices.Contains(cuts, "arm64 dash_cov-probe"))
+	dash := res[0]
+	assert.Equal(t, dash.Arches[1].DebArch, "all")
+	assert.Equal(t, dash.Arches[1].StandIn, "")
+	assert.EqualArrays(t, dash.Arches[0].Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/dash", "/usr/bin/dash-amd64"})
+	assert.EqualArrays(t, dash.Arches[1].Slices["bins"], []string{"/usr/", "/usr/bin/", "/usr/bin/dash"})
+}
+
 func TestRunStopsWhenCancelled(t *testing.T) {
 	f := setup(t)
 	shared := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "chisel")
