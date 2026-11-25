@@ -92,6 +92,7 @@ chisel-coverage [flags] <package>...
       --no-group               one block per architecture with its real paths,
                                instead of folding architectures with the same
                                result
+  -T, --tree                   draw each block's uncovered paths as a tree
       --json                   machine-readable output, one entry per
                                architecture
       --fail-uncovered         exit 1 when any architecture has uncovered paths
@@ -126,6 +127,8 @@ the text report is what is uncovered and nothing else: no indentation, no blank 
    "error": null, "total": 42, "covered": [...], "uncovered": [...], "ignored": [...],
    "slices": {"bins": [...], ...}}]}]}
 ```
+
+`--tree` draws each block's uncovered paths as a tree with `pkg/pathtree`, as `chisel-file --tree` does. a line is the name the tree gives the path, and an uncovered directory keeps its `/`. a directory drawn only to hold others is `<name>/` too, and a run of those with one child each is one line, so a path alone in its block is still one line. the tree does not tell an uncovered directory from a holder. a sign on every path would, as in `chisel-diff`, but a file line is always uncovered and a directory is covered once anything under it is, so the sign would be on every line to say little, and the flat report lists the uncovered directories for whoever needs them. a holder says nothing of the directory's own state, which may be covered, ignored, or uncovered in a block more architectures share. the tree is drawn per block, after the folding. uncovered paths are never merged, so two that fold to one shown path are two lines. it is the text report drawn another way, so it does not go with `--json`, and the flat report stays the one that pipes.
 
 ## layout
 
