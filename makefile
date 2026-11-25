@@ -56,10 +56,12 @@ lint:  ## go vet + staticcheck + deadcode + gofmt check (no writes)
 	@for m in $(MODULES); do \
 		(cd $$m && go vet ./... && go run $(STATICCHECK) ./...) || exit 1; \
 	done
-	@out=$$(go run $(DEADCODE) -test ./... | grep -v '^pkg/'); \
+	@out=$$(go run $(DEADCODE) -test ./... | grep -v -E '^pkg/|/chisel-coverage/pkg@'); \
 	if [ -n "$$out" ]; then echo "Unreachable code:"; echo "$$out"; exit 1; fi
 	@out=$$(gofmt -s -l ./cmd ./internal ./pkg ./e2e version.go); \
 	if [ -n "$$out" ]; then echo "Unformatted files:"; echo "$$out"; exit 1; fi
+	@# go refuses to run or install <module>@<version> when its go.mod has one.
+	@if grep -q '^replace' go.mod; then echo "go.mod has a replace directive"; exit 1; fi
 
 .PHONY: format
 format:  ## gofmt the tree in place

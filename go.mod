@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/jessevdk/go-flags v1.6.1
 	github.com/lczyk/assert v0.7.2
-	github.com/lczyk/chisel-coverage/pkg v0.0.0-00010101000000-000000000000
+	github.com/lczyk/chisel-coverage/pkg v0.11.2
 	github.com/lczyk/version/go v0.6.0
 )
 
@@ -17,5 +17,3 @@ require (
 	golang.org/x/sys v0.35.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/lczyk/chisel-coverage/pkg => ./pkg
